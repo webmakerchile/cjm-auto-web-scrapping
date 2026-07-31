@@ -1,0 +1,1 @@
+- [Deployment port config drift](deploy-port-config.md) — merges can revert .replit; prod needs 5000→80 and gunicorn panel.app:app, check before republish.
