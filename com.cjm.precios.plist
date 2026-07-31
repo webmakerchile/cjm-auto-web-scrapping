@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Agente de launchd para la actualizacion de precios de CJM Digitales.
+
+  ANTES DE INSTALAR: reemplaza __HOME__ por la ruta real de tu carpeta de
+  usuario. Sacala con `echo $HOME` (no la escribas de memoria), por ejemplo:
+
+      sed -i '' "s|__HOME__|$HOME|g" com.cjm.precios.plist
+
+  Corre los dias 1 y 15 de cada mes a las 09:00. Si el Mac esta apagado a esa
+  hora, launchd la ejecuta apenas vuelve a encenderse.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cjm.precios</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__HOME__/CJM-precios/correr.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__/CJM-precios</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Day</key>
+            <integer>1</integer>
+            <key>Hour</key>
+            <integer>9</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Day</key>
+            <integer>15</integer>
+            <key>Hour</key>
+            <integer>9</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/CJM-precios/reportes/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/CJM-precios/reportes/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>es_CL.UTF-8</string>
+    </dict>
+
+    <!-- No queremos que corra al cargar el agente: solo en el horario fijado. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
