@@ -40,6 +40,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -83,6 +84,8 @@ DRY_RUN = True
 ESPERA_PAGINA = 2.5      # segundos de espera tras cargar cada pagina
 REINTENTOS_PAGINA = 2    # reintentos por pagina antes de darla por perdida
 PRODUCTOS_POR_PAGINA = 24  # lo que PS Store devuelve normalmente
+TIMEOUT_PAGINA = 45      # segundos maximos esperando que cargue una pagina
+TIMEOUT_SCRIPT = 30      # segundos maximos para execute_script
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +295,18 @@ class FilaMapeo:
 # SCRAPER
 # ---------------------------------------------------------------------------
 
+def _buscar_ejecutable(*nombres: str) -> str | None:
+    """Primer ejecutable de la lista que exista en el PATH."""
+    for nombre in nombres:
+        ruta = shutil.which(nombre)
+        if ruta:
+            return ruta
+    return None
+
+
 def abrir_navegador(headless: bool = True):
     """Crea el driver de Chrome. Importamos aca para no exigir Selenium
-    en los modos que no scrapean (por ejemplo --validar-tabla)."""
+    en los modos que no scrapean (por ejemplo --fusionar-mapeo)."""
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
@@ -305,6 +317,9 @@ def abrir_navegador(headless: bool = True):
     opciones.add_argument("--window-size=1440,2400")
     opciones.add_argument("--disable-gpu")
     opciones.add_argument("--no-sandbox")
+    # Sin esto Chrome se cae en cualquier contenedor (Replit, Docker): el
+    # /dev/shm por defecto es de 64 MB y no le alcanza.
+    opciones.add_argument("--disable-dev-shm-usage")
     opciones.add_argument("--disable-blink-features=AutomationControlled")
     opciones.add_argument("--lang=es-CL")
     opciones.add_argument(
@@ -313,13 +328,32 @@ def abrir_navegador(headless: bool = True):
     )
     opciones.add_experimental_option("excludeSwitches", ["enable-automation"])
 
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        servicio = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=servicio, options=opciones)
-    except Exception as e:  # noqa: BLE001 - Selenium 4.6+ trae driver propio
-        log(f"webdriver-manager no disponible ({e}); uso Selenium Manager")
-        return webdriver.Chrome(options=opciones)
+    # En Replit y en cualquier contenedor con Nix, Chrome y el chromedriver no
+    # estan donde Selenium los busca. Primero miramos las variables de entorno
+    # y despues el PATH, que es donde los deja Nix.
+    binario = os.environ.get("CJM_CHROME_BINARY") or _buscar_ejecutable(
+        "chromium", "chromium-browser", "google-chrome", "google-chrome-stable"
+    )
+    if binario:
+        opciones.binary_location = binario
+        log(f"Chrome: {binario}")
+    ruta_driver = os.environ.get("CJM_CHROMEDRIVER") or _buscar_ejecutable("chromedriver")
+
+    if ruta_driver:
+        driver = webdriver.Chrome(service=Service(ruta_driver), options=opciones)
+    else:
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opciones)
+        except Exception as e:  # noqa: BLE001 - Selenium 4.6+ trae driver propio
+            log(f"webdriver-manager no disponible ({e}); uso Selenium Manager")
+            driver = webdriver.Chrome(options=opciones)
+
+    # Sin timeout, una pagina colgada deja el proceso esperando para siempre y
+    # launchd o el scheduler nunca se entera.
+    driver.set_page_load_timeout(TIMEOUT_PAGINA)
+    driver.set_script_timeout(TIMEOUT_SCRIPT)
+    return driver
 
 
 def _resolver(nodo: Any, estado: dict, profundidad: int = 0) -> Any:
@@ -637,7 +671,11 @@ def respaldar(ruta: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 def _token() -> str:
-    """Lee el token del Llavero de macOS. Nunca se guarda en disco."""
+    """Token de Shopify. Nunca se guarda en disco ni se imprime.
+
+    En Replit / Linux viene de la variable de entorno CJM_SHOPIFY_TOKEN
+    (pestana Secrets). En macOS, del Llavero.
+    """
     del_entorno = os.environ.get("CJM_SHOPIFY_TOKEN")
     if del_entorno:
         return del_entorno.strip()
@@ -649,14 +687,17 @@ def _token() -> str:
         return salida.stdout.strip()
     except FileNotFoundError:
         raise SystemExit(
-            "No encuentro el comando 'security' (solo existe en macOS).\n"
-            "Fuera de macOS exporta CJM_SHOPIFY_TOKEN en el entorno."
+            "No hay token de Shopify.\n"
+            "  En Replit: agregalo en Secrets como CJM_SHOPIFY_TOKEN.\n"
+            "  En Linux:  export CJM_SHOPIFY_TOKEN='shpat_...'\n"
+            "  (el Llavero de macOS no existe en este sistema)"
         )
     except subprocess.CalledProcessError:
         raise SystemExit(
             f"No hay token en el Llavero para el servicio '{SERVICIO_LLAVERO}'.\n"
             f"Guardalo con:\n"
-            f"  security add-generic-password -s {SERVICIO_LLAVERO} -a shopify -w"
+            f"  security add-generic-password -s {SERVICIO_LLAVERO} -a shopify -w\n"
+            f"O usa la variable de entorno CJM_SHOPIFY_TOKEN."
         )
 
 

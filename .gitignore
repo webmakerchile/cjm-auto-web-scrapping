@@ -3,5 +3,11 @@ reportes/
 __pycache__/
 *.pyc
 .venv/
+venv/
 .DS_Store
 *.html
+.env
+.env.*
+*.token
+.config/
+.upm/

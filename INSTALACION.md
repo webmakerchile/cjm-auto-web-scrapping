@@ -3,6 +3,11 @@
 Sistema de actualización de precios de ofertas PS4/PS5 para **CJM Digitales**
 (tienda Shopify, Chile).
 
+> **Este documento asume macOS** (Llavero, launchd). Si vas a desplegar en
+> **Replit** u otro Linux, lee **[REPLIT.md](REPLIT.md)**: el token va en Secrets
+> y el `.plist` de launchd no aplica. Las secciones 1 a 4 (arquitectura,
+> requisitos, puesta en marcha) valen igual en los dos sistemas.
+
 ---
 
 ## 1. Arquitectura
@@ -32,8 +37,11 @@ store.playstation.com/es-cl
 | `cjm_precios_ps.py` | Todo el sistema. Scraper, filtro, precios, Shopify, reportes. |
 | `tabla_precios.csv` | Tramos de precio. **Editable por ti, es tu política comercial.** |
 | `mapeo.csv` | Cruce juego PS Store ↔ producto Shopify. Lo genera `--bootstrap`, lo apruebas tú. |
-| `correr.sh` | Lanzador para launchd: corre, registra y notifica. |
-| `com.cjm.precios.plist` | Agente de launchd (días 1 y 15, 09:00). |
+| `correr.sh` | Lanzador para launchd o para el Scheduled Deployment de Replit. |
+| `com.cjm.precios.plist` | Agente de launchd (días 1 y 15, 09:00). **Solo macOS.** |
+| `.replit` / `replit.nix` | Configuración de Replit: Python, Chromium y chromedriver. |
+| `pruebas_offline.py` | 55 pruebas de la lógica pura. |
+| `pruebas_integracion.py` | 37 pruebas de Selenium y Shopify con dobles. |
 | `reportes/` | Salidas de cada corrida. No se versiona. |
 
 ### Los tres candados antes de escribir en Shopify
@@ -60,7 +68,7 @@ está como respaldo.
 
 ---
 
-## 3. Token de Shopify (Llavero de macOS)
+## 3. Token de Shopify (Llavero de macOS — en Replit va en Secrets)
 
 El token **nunca** se escribe en un archivo. Se guarda una vez en el Llavero:
 
@@ -93,12 +101,14 @@ export CJM_SHOPIFY_TIENDA="tu-tienda.myshopify.com"
 ### Paso 0 — Pruebas offline
 
 ```bash
-python3 pruebas_offline.py
+python3 pruebas_offline.py       # 55 pruebas de logica pura
+python3 pruebas_integracion.py   # 37 pruebas de Selenium y Shopify con dobles
 ```
 
-55 pruebas de la lógica de precios, filtro, tramos, mapeo y de la corrida
-completa en seco. No abren Chrome ni tocan Shopify, así que sirven para
-confirmar que no rompiste nada después de cualquier cambio.
+92 pruebas en total: precios, filtro, tramos, mapeo, los dos caminos de
+extracción (Apollo y DOM), reintentos, la paginación del catálogo de Shopify, la
+mutación de precios y los tres candados. **Ninguna abre Chrome ni toca internet
+ni escribe en Shopify**, así que se pueden correr siempre que cambies algo.
 
 ### Paso 1 — Diagnóstico del sitio (lo primero, siempre)
 
@@ -207,7 +217,10 @@ La columna `estado` de `cambios_*.csv` dirá `aplicado` o `error: …` por varia
 
 ---
 
-## 5. Dejarlo automático (launchd)
+## 5. Dejarlo automático (launchd — solo macOS)
+
+> En Replit esto no aplica: launchd no existe en Linux. Usa un **Scheduled
+> Deployment**, explicado en [REPLIT.md](REPLIT.md#4-automatizarlo-scheduled-deployment).
 
 ```bash
 # 1. poner la ruta real (no la escribas de memoria)

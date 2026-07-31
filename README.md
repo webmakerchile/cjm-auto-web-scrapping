@@ -9,13 +9,15 @@ API dejando el precio normal en `compareAtPrice` y el de oferta en `price`.
 
 ```bash
 pip3 install -r requirements.txt
-python3 pruebas_offline.py                 # 55 pruebas, sin red ni Shopify
+python3 pruebas_offline.py                 # 55 pruebas de logica, sin red
+python3 pruebas_integracion.py             # 37 pruebas de Selenium y Shopify, sin red
 python3 cjm_precios_ps.py --diagnostico    # primero: validar contra el sitio real
 python3 cjm_precios_ps.py                  # corrida completa en seco
 ```
 
-Instalación, arquitectura y puesta en marcha paso a paso: **[INSTALACION.md](INSTALACION.md)**.
-Prompts de apoyo para Claude Code: **[PROMPTS.md](PROMPTS.md)**.
+- **[INSTALACION.md](INSTALACION.md)** — arquitectura y puesta en marcha en macOS (launchd).
+- **[REPLIT.md](REPLIT.md)** — despliegue en Replit (Linux): Secrets, Chromium por Nix, Scheduled Deployments.
+- **[PROMPTS.md](PROMPTS.md)** — prompts de apoyo para Claude Code.
 
 ## Seguridad
 

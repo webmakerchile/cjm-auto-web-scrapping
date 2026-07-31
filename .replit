@@ -1,0 +1,18 @@
+run = "python3 cjm_precios_ps.py"
+entrypoint = "cjm_precios_ps.py"
+
+[nix]
+channel = "stable-24_05"
+
+[env]
+PYTHONUNBUFFERED = "1"
+PYTHONIOENCODING = "utf-8"
+
+# El boton Run hace una corrida en seco. Nunca escribe en Shopify: para eso
+# hacen falta DRY_RUN = False en el archivo y la bandera --aplicar.
+[deployment]
+run = ["bash", "correr.sh"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
