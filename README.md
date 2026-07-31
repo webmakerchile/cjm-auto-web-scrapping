@@ -18,6 +18,7 @@ python3 cjm_precios_ps.py                  # corrida completa en seco
 
 - **[INSTALACION.md](INSTALACION.md)** — arquitectura y puesta en marcha en macOS (launchd).
 - **[REPLIT.md](REPLIT.md)** — despliegue en Replit (Linux): Secrets, Chromium por Nix, Scheduled Deployments.
+- **[AGENTS.md](AGENTS.md)** — reglas para asistentes de IA que trabajen en este repo.
 - **[PROMPTS.md](PROMPTS.md)** — prompts de apoyo para Claude Code.
 
 ## Seguridad
