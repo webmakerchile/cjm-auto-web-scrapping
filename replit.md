@@ -53,6 +53,15 @@ plan B (DOM), la extracción necesita ajuste: mirá el HTML que deja en
 - Los tramos de `tabla_precios.csv` son un punto de partida sin validar. Son
   política comercial del dueño.
 
+## Panel web privado
+
+- `panel/app.py` (Flask, puerto 5000, workflow "Start application"): login, gestión
+  de usuarios y botón que corre el scraper **siempre con `--solo-simular`**.
+- Superadmin: `webmakerchile@gmail.com`, contraseña en el Secret `SUPERADMIN_PASSWORD`.
+- Usuarios comunes en `panel/usuarios.db` (SQLite, hash de contraseña, fuera de git).
+- CSRF por token de sesión en todos los POST. Correr con **un solo proceso**
+  (el estado de la corrida vive en memoria).
+
 ## Más detalle
 
 - **[AGENTS.md](AGENTS.md)** — guía completa para agentes, incluidas las dos

@@ -12,3 +12,4 @@ venv/
 *.token
 .config/
 .upm/
+panel/usuarios.db
