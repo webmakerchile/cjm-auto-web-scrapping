@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import os
 import re
 import sqlite3
@@ -19,12 +20,18 @@ from pathlib import Path
 
 import secrets
 
+import psycopg2
+import psycopg2.extras
+
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    session, url_for)
 from werkzeug.security import check_password_hash, generate_password_hash
 
 RAIZ = Path(__file__).resolve().parent.parent
-DB = Path(__file__).resolve().parent / "usuarios.db"
+DB_SQLITE_VIEJA = Path(__file__).resolve().parent / "usuarios.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise SystemExit("Falta DATABASE_URL: el panel necesita la base PostgreSQL de Replit")
 REPORTES = RAIZ / "reportes"
 SUPERADMIN = "webmakerchile@gmail.com"
 
@@ -60,12 +67,29 @@ def _destino_seguro(url: str | None) -> str:
     return url_for("inicio")
 
 
-# ---------------------------------------------------------------- usuarios
-def db() -> sqlite3.Connection:
+# ---------------------------------------------------------------- base de datos
+def _conectar():
+    con = psycopg2.connect(DATABASE_URL)
+    con.autocommit = False
+    return con
+
+
+def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB)
-        g.db.row_factory = sqlite3.Row
+        g.db = _conectar()
     return g.db
+
+
+def consulta(sql: str, params: tuple = ()):  # SELECT
+    with db().cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def ejecutar(sql: str, params: tuple = ()) -> None:  # INSERT/UPDATE/DELETE
+    with db().cursor() as cur:
+        cur.execute(sql, params)
+    db().commit()
 
 
 @app.teardown_appcontext
@@ -76,17 +100,84 @@ def _cerrar_db(_exc):
 
 
 def init_db() -> None:
-    con = sqlite3.connect(DB)
-    con.execute(
-        """CREATE TABLE IF NOT EXISTS usuarios (
-               email TEXT PRIMARY KEY,
-               clave_hash TEXT NOT NULL,
-               activo INTEGER NOT NULL DEFAULT 1,
-               creado TEXT NOT NULL
-           )"""
-    )
+    con = _conectar()
+    with con.cursor() as cur:
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS usuarios (
+                   email TEXT PRIMARY KEY,
+                   clave_hash TEXT NOT NULL,
+                   activo INTEGER NOT NULL DEFAULT 1,
+                   creado TEXT NOT NULL
+               )"""
+        )
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS reportes (
+                   nombre TEXT PRIMARY KEY,
+                   contenido TEXT NOT NULL,
+                   modificado TIMESTAMP NOT NULL DEFAULT NOW()
+               )"""
+        )
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS migraciones (
+                   nombre TEXT PRIMARY KEY,
+                   aplicada TIMESTAMP NOT NULL DEFAULT NOW()
+               )"""
+        )
+        # Migración única desde la vieja base SQLite del workspace: solo si
+        # nunca se hizo antes (queda registrada en la tabla migraciones para
+        # que un reinicio no resucite usuarios ya borrados del panel).
+        cur.execute("SELECT 1 FROM migraciones WHERE nombre = %s", ("usuarios_sqlite",))
+        ya_migrada = cur.fetchone() is not None
+        if not ya_migrada and DB_SQLITE_VIEJA.exists():
+            vieja = sqlite3.connect(DB_SQLITE_VIEJA)
+            vieja.row_factory = sqlite3.Row
+            try:
+                filas = vieja.execute(
+                    "SELECT email, clave_hash, activo, creado FROM usuarios"
+                ).fetchall()
+            except sqlite3.Error:
+                filas = []
+            vieja.close()
+            for f in filas:
+                cur.execute(
+                    """INSERT INTO usuarios (email, clave_hash, activo, creado)
+                       VALUES (%s, %s, %s, %s) ON CONFLICT (email) DO NOTHING""",
+                    (f["email"], f["clave_hash"], f["activo"], f["creado"]),
+                )
+            cur.execute(
+                "INSERT INTO migraciones (nombre) VALUES (%s) ON CONFLICT DO NOTHING",
+                ("usuarios_sqlite",),
+            )
     con.commit()
     con.close()
+    sincronizar_reportes()
+
+
+def sincronizar_reportes() -> None:
+    """Copia los CSV de reportes/ a la base para que sobrevivan a un deploy."""
+    if not REPORTES.exists():
+        return
+    con = _conectar()
+    try:
+        with con.cursor() as cur:
+            for p in REPORTES.glob("*.csv"):
+                try:
+                    contenido = p.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                mtime = datetime.fromtimestamp(p.stat().st_mtime)
+                cur.execute(
+                    """INSERT INTO reportes (nombre, contenido, modificado)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (nombre) DO UPDATE
+                       SET contenido = EXCLUDED.contenido,
+                           modificado = EXCLUDED.modificado
+                       WHERE reportes.modificado < EXCLUDED.modificado""",
+                    (p.name, contenido, mtime),
+                )
+        con.commit()
+    finally:
+        con.close()
 
 
 def verificar_credenciales(email: str, clave: str) -> bool:
@@ -94,9 +185,10 @@ def verificar_credenciales(email: str, clave: str) -> bool:
     if email == SUPERADMIN:
         esperada = os.environ.get("SUPERADMIN_PASSWORD")
         return bool(esperada) and clave == esperada
-    fila = db().execute(
-        "SELECT clave_hash, activo FROM usuarios WHERE email = ?", (email,)
-    ).fetchone()
+    filas = consulta(
+        "SELECT clave_hash, activo FROM usuarios WHERE email = %s", (email,)
+    )
+    fila = filas[0] if filas else None
     return bool(fila) and bool(fila["activo"]) and check_password_hash(fila["clave_hash"], clave)
 
 
@@ -143,6 +235,10 @@ def _correr_scraper(paginas: int | None) -> None:
             _corrida["log"].append(linea.rstrip("\n"))
         proc.wait()
         _corrida["codigo"] = proc.returncode
+        try:
+            sincronizar_reportes()
+        except Exception as e:  # noqa: BLE001
+            _corrida["log"].append(f"AVISO: no se pudieron respaldar los reportes en la base: {e}")
     except Exception as e:  # noqa: BLE001
         _corrida["log"].append(f"ERROR al lanzar el scraper: {e}")
         _corrida["codigo"] = -1
@@ -152,26 +248,22 @@ def _correr_scraper(paginas: int | None) -> None:
 
 
 def ultimos_reportes() -> list[dict]:
-    if not REPORTES.exists():
-        return []
-    archivos = sorted(
-        (p for p in REPORTES.glob("*.csv")),
-        key=lambda p: p.stat().st_mtime, reverse=True,
-    )[:10]
+    filas = consulta(
+        "SELECT nombre, modificado FROM reportes ORDER BY modificado DESC LIMIT 10"
+    )
     return [
-        {"nombre": p.name, "modificado": datetime.fromtimestamp(p.stat().st_mtime).strftime("%d-%m-%Y %H:%M:%S")}
-        for p in archivos
+        {"nombre": f["nombre"], "modificado": f["modificado"].strftime("%d-%m-%Y %H:%M:%S")}
+        for f in filas
     ]
 
 
 def leer_csv(nombre: str) -> tuple[list[str], list[list[str]]]:
     if not re.fullmatch(r"[\w.\-]+\.csv", nombre):
         abort(404)
-    ruta = (REPORTES / nombre).resolve()
-    if ruta.parent != REPORTES.resolve() or not ruta.is_file() or ruta.is_symlink():
+    filas_db = consulta("SELECT contenido FROM reportes WHERE nombre = %s", (nombre,))
+    if not filas_db:
         abort(404)
-    with ruta.open(newline="", encoding="utf-8") as f:
-        filas = list(csv.reader(f))
+    filas = list(csv.reader(io.StringIO(filas_db[0]["contenido"])))
     if not filas:
         return [], []
     return filas[0], filas[1:501]
@@ -268,16 +360,16 @@ def usuarios():
             flash("La contraseña debe tener al menos 8 caracteres.")
         else:
             try:
-                db().execute(
-                    "INSERT INTO usuarios (email, clave_hash, activo, creado) VALUES (?,?,1,?)",
+                ejecutar(
+                    "INSERT INTO usuarios (email, clave_hash, activo, creado) VALUES (%s,%s,1,%s)",
                     (email, generate_password_hash(clave), datetime.now().isoformat(timespec="seconds")),
                 )
-                db().commit()
                 flash(f"Usuario {email} creado.")
-            except sqlite3.IntegrityError:
+            except psycopg2.IntegrityError:
+                db().rollback()
                 flash("Ese correo ya existe.")
         return redirect(url_for("usuarios"))
-    lista = db().execute("SELECT email, activo, creado FROM usuarios ORDER BY creado").fetchall()
+    lista = consulta("SELECT email, activo, creado FROM usuarios ORDER BY creado")
     return render_template("usuarios.html", lista=lista)
 
 
@@ -285,8 +377,7 @@ def usuarios():
 @requiere_login
 @requiere_superadmin
 def usuario_alternar(email: str):
-    db().execute("UPDATE usuarios SET activo = 1 - activo WHERE email = ?", (email.lower(),))
-    db().commit()
+    ejecutar("UPDATE usuarios SET activo = 1 - activo WHERE email = %s", (email.lower(),))
     return redirect(url_for("usuarios"))
 
 
@@ -294,8 +385,7 @@ def usuario_alternar(email: str):
 @requiere_login
 @requiere_superadmin
 def usuario_borrar(email: str):
-    db().execute("DELETE FROM usuarios WHERE email = ?", (email.lower(),))
-    db().commit()
+    ejecutar("DELETE FROM usuarios WHERE email = %s", (email.lower(),))
     flash(f"Usuario {email} eliminado.")
     return redirect(url_for("usuarios"))
 

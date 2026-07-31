@@ -1,9 +1,10 @@
 run = "python3 cjm_precios_ps.py"
 entrypoint = "cjm_precios_ps.py"
-modules = ["python-3.12", "bash", "nix"]
+modules = ["python-3.12", "bash", "nix", "postgresql-16"]
 
 [nix]
 channel = "stable-25_05"
+packages = ["geckodriver"]
 
 [env]
 PYTHONUNBUFFERED = "1"

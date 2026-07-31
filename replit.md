@@ -58,7 +58,10 @@ plan B (DOM), la extracción necesita ajuste: mirá el HTML que deja en
 - `panel/app.py` (Flask, puerto 5000, workflow "Start application"): login, gestión
   de usuarios y botón que corre el scraper **siempre con `--solo-simular`**.
 - Superadmin: `webmakerchile@gmail.com`, contraseña en el Secret `SUPERADMIN_PASSWORD`.
-- Usuarios comunes en `panel/usuarios.db` (SQLite, hash de contraseña, fuera de git).
+- Usuarios comunes en la base PostgreSQL de Replit (tabla `usuarios`, hash de
+  contraseña). Los CSV de `reportes/` también se respaldan en la tabla `reportes`
+  al arrancar el panel y al terminar cada corrida, así sobreviven a un deploy.
+  La vieja `panel/usuarios.db` (SQLite) solo se usa una vez para migrar.
 - CSRF por token de sesión en todos los POST. Correr con **un solo proceso**
   (el estado de la corrida vive en memoria).
 

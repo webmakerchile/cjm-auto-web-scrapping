@@ -87,6 +87,17 @@ En vez de launchd:
 puesto `DRY_RUN = False`). Si quieres que el automático solo simule, cambia esa
 bandera por `--solo-simular` dentro de `correr.sh`.
 
+### ✅ El panel ya guarda usuarios y reportes en PostgreSQL
+
+El panel web (`panel/app.py`) guarda los usuarios y una copia de cada CSV de
+`reportes/` en la base PostgreSQL de Replit, así que **publicar el panel ya no
+pierde esos datos**. La sincronización ocurre al arrancar el panel y al terminar
+cada corrida del scraper lanzada desde el panel.
+
+La advertencia de abajo sigue aplicando a corridas **fuera del panel** (por
+ejemplo, un Scheduled Deployment que corre `correr.sh` directo): esos CSV no
+pasan por el panel y se pierden con el contenedor.
+
 ### ⚠️ Los reportes no sobreviven al Scheduled Deployment
 
 Cada corrida programada arranca en un contenedor limpio y **su disco se borra al
