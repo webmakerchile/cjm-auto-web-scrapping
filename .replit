@@ -12,11 +12,15 @@ PYTHONIOENCODING = "utf-8"
 # El boton Run hace una corrida en seco. Nunca escribe en Shopify: para eso
 # hacen falta DRY_RUN = False en el archivo y la bandera --aplicar.
 [deployment]
-run = ["bash", "correr.sh"]
+run = ["gunicorn", "--bind=0.0.0.0:5000", "--workers=1", "--threads=8", "panel.app:app"]
 
 [[ports]]
 localPort = 5000
 externalPort = 5000
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
 
 [[ports]]
 localPort = 8080
