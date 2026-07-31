@@ -36,13 +36,22 @@ contar() { [ -f "$1" ] && echo $(( $(wc -l < "$1") - 1 )) || echo 0; }
 CAMBIOS=$(contar "$ULTIMO_CAMBIOS")
 REVISAR=$(contar "$ULTIMO_REVISAR")
 
-if [ $ESTADO -eq 0 ]; then
-  TITULO="CJM precios: listo"
-  MENSAJE="${CAMBIOS} precios actualizados, ${REVISAR} por revisar"
-else
-  TITULO="CJM precios: con errores"
-  MENSAJE="Codigo ${ESTADO}. Revisa reportes/cron.log"
-fi
+case $ESTADO in
+  0)
+    TITULO="CJM precios: listo"
+    MENSAJE="${CAMBIOS} precios actualizados, ${REVISAR} por revisar"
+    ;;
+  2)
+    # El scraper no extrajo NI UN producto: Chrome no arranco, PS Store cambio,
+    # o la red esta bloqueada. Esto antes se anunciaba como exito.
+    TITULO="CJM precios: NO se extrajo nada"
+    MENSAJE="El scraper devolvio 0 productos. Corre --diagnostico"
+    ;;
+  *)
+    TITULO="CJM precios: con errores"
+    MENSAJE="Codigo ${ESTADO}. Revisa reportes/cron.log y cambios_*.csv"
+    ;;
+esac
 
 echo "$(date '+%H:%M:%S') ${TITULO} — ${MENSAJE}" >> "$REGISTRO"
 

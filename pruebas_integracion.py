@@ -109,7 +109,9 @@ class DriverFalso:
             raise Exception("timeout simulado del navegador")
 
     def execute_script(self, script):
-        return self.apollo
+        # JS_APOLLO devuelve texto, no un objeto: chromedriver reordena las
+        # claves de los objetos y eso rompia la deduplicacion.
+        return json.dumps(self.apollo) if self.apollo is not None else None
 
     def find_elements(self, by, selector):
         return self.tarjetas if selector.startswith("[data-qa") else []
@@ -218,7 +220,7 @@ def _variantes(pid, base):
     ]}
 
 
-def responder(url, headers=None, json=None, timeout=None):
+def responder(url, headers=None, json=None, timeout=None, allow_redirects=None):
     llamadas.append({"url": url, "headers": headers, "body": json})
     if "products(first" in json["query"]:
         if json["variables"].get("cursor") is None:
@@ -251,7 +253,7 @@ revisar("sin userErrors devuelve lista vacia",
         cjm.aplicar_precios("gid://shopify/Product/1",
                             [{"id": "gid://shopify/ProductVariant/11", "price": "11990"}]), [])
 
-requests_falso.post = lambda url, headers=None, json=None, timeout=None: RespuestaFalsa(
+requests_falso.post = lambda url, headers=None, json=None, timeout=None, allow_redirects=None: RespuestaFalsa(
     {"data": {"productVariantsBulkUpdate": {"productVariants": [], "userErrors": [
         {"field": ["variants", "0", "price"], "message": "Price must be greater than 0"}]}}})
 revisar("reporta los userErrors de Shopify",

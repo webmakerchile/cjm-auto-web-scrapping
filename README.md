@@ -11,6 +11,7 @@ API dejando el precio normal en `compareAtPrice` y el de oferta en `price`.
 pip3 install -r requirements.txt
 python3 pruebas_offline.py                 # 55 pruebas de logica, sin red
 python3 pruebas_integracion.py             # 37 pruebas de Selenium y Shopify, sin red
+python3 pruebas_regresion.py               # 64 pruebas, una por bug ya corregido
 python3 cjm_precios_ps.py --diagnostico    # primero: validar contra el sitio real
 python3 cjm_precios_ps.py                  # corrida completa en seco
 ```

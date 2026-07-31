@@ -71,9 +71,16 @@ En vez de launchd:
 
 1. **Deploy** → **Scheduled**.
 2. Comando: `bash correr.sh`
-3. Frecuencia: `0 9 1,15 * *` (días 1 y 15 a las 09:00 UTC — **ojo, UTC**: para
-   las 09:00 de Chile usa `0 12 1,15 * *` en horario de invierno y
-   `0 13 1,15 * *` en horario de verano).
+3. Frecuencia: **el cron se evalúa en UTC**, y Chile no está en UTC. Para que
+   dispare a las 09:00 de Chile los días 1 y 15:
+
+   | Época del año | Hora de Chile | Cron (UTC) |
+   |---|---|---|
+   | Invierno (abril–septiembre, UTC−4) | 09:00 | `0 13 1,15 * *` |
+   | Verano (septiembre–abril, UTC−3) | 09:00 | `0 12 1,15 * *` |
+
+   Si no quieres tocarlo dos veces al año, deja `0 13 1,15 * *` fijo: en verano
+   dispara a las 10:00 de Chile, que para una tarea quincenal da lo mismo.
 4. Los Secrets del Repl se heredan en el deployment.
 
 `correr.sh` corre con `--aplicar`, o sea escribe en Shopify (siempre que hayas

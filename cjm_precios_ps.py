@@ -59,6 +59,9 @@ BASE = Path(__file__).resolve().parent
 REPORTES = BASE / "reportes"
 ARCHIVO_TABLA = BASE / "tabla_precios.csv"
 ARCHIVO_MAPEO = BASE / "mapeo.csv"
+# Que juegos estaban en oferta la corrida anterior, para poder avisar cuando una
+# promocion termina (el sistema solo baja precios, nunca los sube solo).
+ARCHIVO_ESTADO = BASE / "estado.json"
 
 # Categorias de PS Store a recorrer: (id_categoria, cantidad_de_paginas).
 # El id largo es la categoria de ofertas de la tienda chilena.
@@ -75,8 +78,14 @@ MONEDA_ESPERADA = "CLP"
 
 # Shopify
 TIENDA = os.environ.get("CJM_SHOPIFY_TIENDA", "cjm-digitales.myshopify.com")
-API_VERSION = "2025-01"
+# Shopify soporta cada version por 12 meses. Si esta expira, la API sirve otra
+# version en silencio y el comportamiento puede cambiar sin avisar: convive
+# revisar https://shopify.dev/docs/api/usage/versioning una vez al ano.
+API_VERSION = os.environ.get("CJM_SHOPIFY_API_VERSION", "2026-04")
 SERVICIO_LLAVERO = "cjm_shopify_token"
+REINTENTOS_SHOPIFY = 5
+PAUSA_ENTRE_LLAMADAS = 0.5   # segundos, para no drenar el bucket de puntos
+FALLOS_SEGUIDOS_MAX = 5      # cortacircuito al aplicar precios
 
 # Escribir en Shopify solo cuando se pide explicitamente con --aplicar.
 DRY_RUN = True
@@ -95,6 +104,12 @@ TIMEOUT_SCRIPT = 30      # segundos maximos para execute_script
 # PS Store es un Next.js: el HTML inicial trae un <script id="__NEXT_DATA__">
 # con la cache normalizada de Apollo. Preferimos leer eso antes que el DOM
 # porque incluye la clasificacion del producto y los precios ya separados.
+#
+# Devolvemos el estado como TEXTO y no como objeto: chromedriver serializa los
+# objetos JS ordenando las claves alfabeticamente, y con eso 'Concept:...'
+# siempre le gana a 'Product:...' al deduplicar. El Concept no trae
+# clasificacion, asi que el filtro exacto de DLC no correria nunca en
+# produccion. Con JSON.stringify el orden de insercion se respeta.
 JS_APOLLO = """
 function buscarEstado() {
   const el = document.getElementById('__NEXT_DATA__');
@@ -116,7 +131,8 @@ function buscarEstado() {
   }
   return null;
 }
-return buscarEstado();
+const estado = buscarEstado();
+return estado ? JSON.stringify(estado) : null;
 """
 
 # Claves de la cache de Apollo que representan un producto vendible.
@@ -256,6 +272,7 @@ class JuegoPS:
     descuento: str | None = None
     origen: str = "apollo"          # apollo | dom
     plataformas: list[str] = field(default_factory=list)
+    es_producto: bool = False       # vino de un Product (no de un Concept)
 
     @property
     def en_oferta(self) -> bool:
@@ -269,6 +286,25 @@ class JuegoPS:
     def precio_referencia(self) -> Decimal | None:
         """El precio que usamos para buscar tramo: siempre el rebajado."""
         return self.precio_oferta if self.precio_oferta is not None else self.precio_normal
+
+
+@dataclass
+class ResultadoScrape:
+    """Lo raspado mas el estado de la corrida.
+
+    Se comporta como una lista de juegos para que el resto del codigo (y las
+    pruebas) puedan seguir iterandolo y midiendolo directamente.
+    """
+    juegos: list[JuegoPS]
+    paginas_error: int = 0
+    paginas_dom: int = 0
+    paginas_apollo: int = 0
+
+    def __iter__(self):
+        return iter(self.juegos)
+
+    def __len__(self) -> int:
+        return len(self.juegos)
 
 
 @dataclass
@@ -289,6 +325,7 @@ class FilaMapeo:
     variante_primaria: str
     variante_secundaria: str
     activo: bool = True
+    problema: str | None = None   # id de Shopify mal formado, etc.
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +406,20 @@ def _resolver(nodo: Any, estado: dict, profundidad: int = 0) -> Any:
     return nodo
 
 
+def leer_apollo(driver) -> dict | None:
+    """Ejecuta JS_APOLLO y devuelve el estado ya parseado (o None)."""
+    crudo = driver.execute_script(JS_APOLLO)
+    if not crudo:
+        return None
+    if isinstance(crudo, dict):  # driver antiguo que no respeta el stringify
+        return crudo
+    try:
+        return json.loads(crudo)
+    except (TypeError, ValueError) as e:
+        log(f"  no pude parsear el estado de Apollo: {e}")
+        return None
+
+
 def _buscar_bloque_precio(nodo: dict) -> dict | None:
     """Encuentra el sub-diccionario que trae basePrice/discountedPrice."""
     marcas = ("basePrice", "discountedPrice", "basePriceValue", "discountedValue")
@@ -436,17 +487,41 @@ def desde_apollo(estado: dict) -> list[JuegoPS]:
                 descuento=bloque.get("discountText"),
                 origen="apollo",
                 plataformas=[str(p) for p in plataformas if p],
+                es_producto=clave.startswith(("Product:", "ProductRetail:")),
             )
         )
 
-    # La cache trae Product y Concept del mismo juego: deduplicamos por nombre.
+    # La cache trae el mismo juego como Product y como Concept, y cada uno trae
+    # cosas distintas: el Product tiene la clasificacion, el Concept a veces
+    # tiene el precio. En vez de que uno pise al otro, los fusionamos; asi el
+    # resultado no depende del orden en que vengan las claves.
     unicos: dict[str, JuegoPS] = {}
     for j in juegos:
         clave = normalizar(j.nombre)
         previo = unicos.get(clave)
-        if previo is None or (previo.precio_oferta is None and j.precio_oferta is not None):
-            unicos[clave] = j
+        unicos[clave] = _fusionar(j, previo) if previo else j
     return list(unicos.values())
+
+
+def _fusionar(a: JuegoPS, b: JuegoPS) -> JuegoPS:
+    """Combina dos registros del mismo juego quedandose con lo mejor de cada uno.
+
+    El ps_id del Product es el id real de la ficha de tienda, asi que gana
+    sobre el del Concept.
+    """
+    principal, otro = (a, b) if a.es_producto or not b.es_producto else (b, a)
+    return JuegoPS(
+        ps_id=principal.ps_id or otro.ps_id,
+        nombre=principal.nombre,
+        clasificacion=principal.clasificacion or otro.clasificacion,
+        moneda=principal.moneda or otro.moneda,
+        precio_normal=principal.precio_normal if principal.precio_normal is not None else otro.precio_normal,
+        precio_oferta=principal.precio_oferta if principal.precio_oferta is not None else otro.precio_oferta,
+        descuento=principal.descuento or otro.descuento,
+        origen=principal.origen,
+        plataformas=principal.plataformas or otro.plataformas,
+        es_producto=principal.es_producto or otro.es_producto,
+    )
 
 
 def desde_dom(driver) -> list[JuegoPS]:
@@ -469,6 +544,7 @@ def desde_dom(driver) -> list[JuegoPS]:
         return []
 
     juegos: list[JuegoPS] = []
+    vistos: set[str] = set()
     for i, tarjeta in enumerate(tarjetas):
         try:
             texto = tarjeta.text or ""
@@ -478,22 +554,51 @@ def desde_dom(driver) -> list[JuegoPS]:
             # Nombre: primera linea que no sea un precio ni un porcentaje.
             nombre = next(
                 (l for l in lineas if not re.match(r"^[-+]?\s*[\d$%.,\s]+$", l)),
-                lineas[0],
+                "",
             )
+            # El selector tambien matchea nodos hijos de la tarjeta, que
+            # producen filas basura sin nombre o con un precio por nombre.
+            if not nombre or "$" in nombre:
+                continue
+
             precios = [l for l in lineas if "$" in l]
-            oferta = parse_precio(precios[0], MONEDA_ESPERADA) if precios else None
-            normal = parse_precio(precios[1], MONEDA_ESPERADA) if len(precios) > 1 else None
-            if normal is not None and oferta is not None and normal < oferta:
-                normal, oferta = oferta, normal
+            if len(precios) > 2:
+                # Tres precios = hay un precio de PS Plus de por medio. No
+                # sabemos cual de los dos rebajados aplica, y adivinar publica
+                # un precio mas barato que el real: mejor no tocarlo.
+                log(f"  '{nombre[:40]}' trae {len(precios)} precios: la salteo (¿precio PS Plus?)")
+                continue
+            valores = [p for p in (parse_precio(x, MONEDA_ESPERADA) for x in precios) if p is not None]
+            if not valores:
+                continue
+            oferta, normal = min(valores), max(valores)
+
+            # NUNCA inventar un id. Un id posicional tipo 'dom-3' se repite en
+            # cada pagina y en cada corrida apunta a un juego distinto: si entra
+            # a mapeo.csv, termina escribiendole a un producto de Shopify el
+            # precio de otro juego. Sin id, el cruce se hace por nombre.
             href = tarjeta.get_attribute("href") or ""
-            ps_id = href.rstrip("/").split("/")[-1] if href else f"dom-{i}"
+            if not href:
+                try:
+                    href = tarjeta.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href") or ""
+                except Exception:  # noqa: BLE001
+                    href = ""
+            ps_id = ""
+            if "/product/" in href or "/concept/" in href:
+                ps_id = href.rstrip("/").split("/")[-1]
+
+            clave = ps_id or normalizar(nombre)
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+
             juegos.append(
                 JuegoPS(
                     ps_id=ps_id,
                     nombre=nombre,
                     clasificacion=None,
                     moneda=MONEDA_ESPERADA,
-                    precio_normal=normal or oferta,
+                    precio_normal=normal,
                     precio_oferta=oferta,
                     origen="dom",
                 )
@@ -504,13 +609,21 @@ def desde_dom(driver) -> list[JuegoPS]:
 
 
 def raspar_pagina(driver, categoria: str, pagina: int) -> tuple[list[JuegoPS], str]:
-    """Devuelve (juegos, origen) para una pagina de categoria."""
+    """Devuelve (juegos, origen) para una pagina de categoria.
+
+    El origen distingue dos finales muy distintos que antes se confundian:
+      'vacio' = la pagina cargo bien y no tiene productos (fin del catalogo).
+      'error' = la pagina nunca cargo (timeout, red, navegador caido).
+    Confundirlos hacia que un timeout se leyera como "se acabo el catalogo" y
+    abandonara en silencio las 149 paginas siguientes.
+    """
     url = URL_CATEGORIA.format(locale=LOCALE, cat=categoria, pagina=pagina)
+    hubo_excepcion = False
     for intento in range(REINTENTOS_PAGINA + 1):
         try:
             driver.get(url)
             time.sleep(ESPERA_PAGINA)
-            estado = driver.execute_script(JS_APOLLO)
+            estado = leer_apollo(driver)
             if estado:
                 juegos = desde_apollo(estado)
                 if juegos:
@@ -518,14 +631,16 @@ def raspar_pagina(driver, categoria: str, pagina: int) -> tuple[list[JuegoPS], s
             juegos = desde_dom(driver)
             if juegos:
                 return juegos, "dom"
+            hubo_excepcion = False
             if intento < REINTENTOS_PAGINA:
                 log(f"  pagina {pagina} vino vacia, reintento {intento + 1}")
                 time.sleep(3 * (intento + 1))
         except Exception as e:  # noqa: BLE001
+            hubo_excepcion = True
             log(f"  error en pagina {pagina}: {e}")
             if intento < REINTENTOS_PAGINA:
                 time.sleep(3 * (intento + 1))
-    return [], "vacio"
+    return [], ("error" if hubo_excepcion else "vacio")
 
 
 def raspar_todo(
@@ -536,24 +651,46 @@ def raspar_todo(
     categorias = ((solo_categoria, CATEGORIAS[0][1]),) if solo_categoria else CATEGORIAS
     driver = abrir_navegador(headless=headless)
     encontrados: dict[str, JuegoPS] = {}
-    conteo_origen = {"apollo": 0, "dom": 0, "vacio": 0}
+    conteo = {"apollo": 0, "dom": 0, "vacio": 0, "error": 0}
     try:
         for categoria, paginas in categorias:
             total = paginas if paginas_max is None else min(paginas, paginas_max)
+            vacias_seguidas = 0
             for pagina in range(1, total + 1):
                 juegos, origen = raspar_pagina(driver, categoria, pagina)
-                conteo_origen[origen] = conteo_origen.get(origen, 0) + 1
+                conteo[origen] = conteo.get(origen, 0) + 1
                 log(f"pagina {pagina}/{total}: {len(juegos)} productos (via {origen})")
                 for j in juegos:
                     encontrados.setdefault(normalizar(j.nombre), j)
-                if not juegos and pagina > 1:
-                    log("  pagina vacia despues de la primera: doy la categoria por terminada")
-                    break
+
+                if origen == "error":
+                    # No sabemos si hay catalogo mas alla: seguimos y lo
+                    # contamos como fallo, para no abandonar 149 paginas por
+                    # un timeout.
+                    vacias_seguidas = 0
+                    continue
+                if origen == "vacio":
+                    vacias_seguidas += 1
+                    if vacias_seguidas >= 2:
+                        log("  dos paginas vacias seguidas: doy la categoria por terminada")
+                        break
+                else:
+                    vacias_seguidas = 0
     finally:
         driver.quit()
-    log(f"origen de datos -> apollo: {conteo_origen['apollo']} paginas, "
-        f"dom: {conteo_origen['dom']}, vacias: {conteo_origen['vacio']}")
-    return list(encontrados.values())
+    log(f"origen de datos -> apollo: {conteo['apollo']} paginas, dom: {conteo['dom']}, "
+        f"vacias: {conteo['vacio']}, con error: {conteo['error']}")
+    if conteo["dom"]:
+        log(f"AVISO: {conteo['dom']} pagina(s) cayeron al plan B (DOM): sin clasificacion "
+            f"de producto el filtro de DLC es menos exacto.")
+    if conteo["error"]:
+        log(f"AVISO: {conteo['error']} pagina(s) nunca cargaron. El resultado esta incompleto.")
+    return ResultadoScrape(
+        juegos=list(encontrados.values()),
+        paginas_error=conteo["error"],
+        paginas_dom=conteo["dom"],
+        paginas_apollo=conteo["apollo"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +709,10 @@ def es_juego_completo(j: JuegoPS) -> tuple[bool, str]:
 
     nombre = normalizar(j.nombre)
     for palabra in PALABRAS_DESCARTE:
-        if normalizar(palabra) in nombre:
+        # Palabra completa, no substring: 'demo' NO puede descartar
+        # "Demon's Souls", ni 'tema' a "Tematica".
+        patron = rf"(?<![a-z0-9]){re.escape(normalizar(palabra))}(?![a-z0-9])"
+        if re.search(patron, nombre):
             return False, f"palabra='{palabra}'"
     return True, "sin senales de DLC"
 
@@ -609,6 +749,19 @@ def cargar_tabla(ruta: Path | None = None) -> list[Tramo]:
             raise SystemExit(
                 f"{ruta.name}: los tramos {a.desde}-{a.hasta} y {b.desde}-{b.hasta} se solapan"
             )
+    # Un compareAtPrice menor que el precio deja la ficha mostrando un "descuento"
+    # negativo. Shopify lo acepta sin quejarse, asi que hay que atajarlo aca.
+    for t in tramos:
+        for etiqueta, precio, compare in (
+            ("primaria", t.precio_primaria, t.compare_primaria),
+            ("secundaria", t.precio_secundaria, t.compare_secundaria),
+        ):
+            if compare is not None and compare <= precio:
+                raise SystemExit(
+                    f"{ruta.name}: en el tramo {t.desde}-{t.hasta}, compare_{etiqueta}={compare} "
+                    f"no es mayor que precio_{etiqueta}={precio}. El precio tachado tiene que ser "
+                    f"el mas alto."
+                )
     return tramos
 
 
@@ -635,7 +788,7 @@ def cargar_mapeo(ruta: Path | None = None) -> dict[str, FilaMapeo]:
         return {}
     mapeo: dict[str, FilaMapeo] = {}
     with ruta.open(encoding="utf-8-sig", newline="") as fh:
-        for fila in csv.DictReader(fh):
+        for numero, fila in enumerate(csv.DictReader(fh), start=2):
             if not fila.get("ps_nombre"):
                 continue
             f = FilaMapeo(
@@ -646,15 +799,63 @@ def cargar_mapeo(ruta: Path | None = None) -> dict[str, FilaMapeo]:
                 variante_secundaria=(fila.get("variante_secundaria") or "").strip(),
                 activo=(fila.get("activo") or "si").strip().lower() not in ("no", "0", "false"),
             )
-            # Indexamos por nombre normalizado y tambien por id cuando lo hay.
+            f.problema = _revisar_ids(f, numero, ruta.name)
             mapeo[normalizar(f.ps_nombre)] = f
-            if f.ps_id:
-                mapeo[f"id:{f.ps_id}"] = f
+
+            if not f.ps_id:
+                continue
+            if not _id_confiable(f.ps_id):
+                log(f"aviso: {ruta.name} linea {numero}: ignoro el ps_id '{f.ps_id}' "
+                    f"(parece inventado); '{f.ps_nombre}' se cruzara por nombre")
+                continue
+            clave = f"id:{f.ps_id}"
+            if clave in mapeo:
+                # Dos filas con el mismo ps_id: no hay forma de saber cual es la
+                # buena, asi que no gana ninguna y las dos caen al cruce por nombre.
+                log(f"aviso: {ruta.name} linea {numero}: ps_id '{f.ps_id}' duplicado; "
+                    f"anulo el indice por id para ese id")
+                mapeo.pop(clave, None)
+            else:
+                mapeo[clave] = f
     return mapeo
 
 
+# Un id de PS Store real se parece a 'EP0001-CUSA12345_00-XXXXXXXXXXXXXXXX' o a
+# un numero de concepto. Lo que no puede ser es un id posicional inventado.
+def _id_confiable(ps_id: str) -> bool:
+    return bool(ps_id) and not ps_id.startswith("dom-")
+
+
+PREFIJO_GID = "gid://shopify/"
+
+
+def _revisar_ids(f: FilaMapeo, numero: int, archivo: str) -> str | None:
+    """Detecta ids de Shopify mal pegados ANTES de mandarselos a la API.
+
+    Un id numerico pelado (copiado de la URL del admin) no produce un userError:
+    produce un error de GraphQL que mata la corrida entera a mitad de camino.
+    """
+    malos = [
+        f"{campo}='{valor}'"
+        for campo, valor in (
+            ("producto_id", f.producto_id),
+            ("variante_primaria", f.variante_primaria),
+            ("variante_secundaria", f.variante_secundaria),
+        )
+        if valor and not valor.startswith(PREFIJO_GID)
+    ]
+    if not malos:
+        return None
+    return (f"{archivo} linea {numero}: {', '.join(malos)} no empieza con "
+            f"{PREFIJO_GID} (¿copiaste el numero de la URL del admin?)")
+
+
 def buscar_en_mapeo(mapeo: dict[str, FilaMapeo], j: JuegoPS) -> FilaMapeo | None:
-    return mapeo.get(f"id:{j.ps_id}") or mapeo.get(normalizar(j.nombre))
+    if _id_confiable(j.ps_id):
+        fila = mapeo.get(f"id:{j.ps_id}")
+        if fila:
+            return fila
+    return mapeo.get(normalizar(j.nombre))
 
 
 def respaldar(ruta: Path) -> Path | None:
@@ -701,35 +902,98 @@ def _token() -> str:
         )
 
 
+def _validar_tienda() -> str:
+    """El token viaja en una cabecera propia, y requests reenvia las cabeceras
+    personalizadas en las redirecciones. Un dominio mal escrito en la config
+    podria mandarle el token a un tercero, asi que lo validamos aca y ademas
+    prohibimos seguir redirecciones."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*\.myshopify\.com", TIENDA or "", re.IGNORECASE):
+        raise SystemExit(
+            f"El dominio de la tienda ('{TIENDA}') no tiene la forma "
+            f"tu-tienda.myshopify.com. Corrige CJM_SHOPIFY_TIENDA antes de seguir."
+        )
+    return TIENDA
+
+
 def graphql(consulta: str, variables: dict | None = None) -> dict:
     import requests
 
-    url = f"https://{TIENDA}/admin/api/{API_VERSION}/graphql.json"
+    url = f"https://{_validar_tienda()}/admin/api/{API_VERSION}/graphql.json"
     cabeceras = {"X-Shopify-Access-Token": _token(), "Content-Type": "application/json"}
-    for intento in range(4):
-        r = requests.post(url, headers=cabeceras, json={"query": consulta, "variables": variables or {}}, timeout=45)
-        if r.status_code == 429:
+    cuerpo = {"query": consulta, "variables": variables or {}}
+
+    for intento in range(REINTENTOS_SHOPIFY):
+        try:
+            r = requests.post(url, headers=cabeceras, json=cuerpo, timeout=45,
+                              allow_redirects=False)
+        except Exception as e:  # noqa: BLE001 - ConnectionError, ReadTimeout, etc.
+            if intento == REINTENTOS_SHOPIFY - 1:
+                raise
             espera = 2 ** intento
-            log(f"  Shopify pidio esperar (429), duermo {espera}s")
+            log(f"  fallo de red hablando con Shopify ({type(e).__name__}), reintento en {espera}s")
             time.sleep(espera)
             continue
+
+        if r.status_code in (301, 302, 303, 307, 308):
+            raise RuntimeError(
+                f"Shopify respondio una redireccion ({r.status_code}). No la sigo para no "
+                f"filtrar el token. Revisa el dominio de la tienda."
+            )
+        if r.status_code == 429 or r.status_code >= 500:
+            if intento == REINTENTOS_SHOPIFY - 1:
+                r.raise_for_status()
+            espera = 2 ** intento
+            log(f"  Shopify respondio {r.status_code}, reintento en {espera}s")
+            time.sleep(espera)
+            continue
+
         r.raise_for_status()
         datos = r.json()
-        if datos.get("errors"):
-            raise RuntimeError(f"Shopify GraphQL: {datos['errors']}")
+        errores = datos.get("errors")
+        if errores:
+            codigos = {
+                (e.get("extensions") or {}).get("code")
+                for e in errores if isinstance(e, dict)
+            }
+            # THROTTLED llega con HTTP 200: si no se atiende, mata la corrida.
+            if "THROTTLED" in codigos and intento < REINTENTOS_SHOPIFY - 1:
+                espera = _espera_por_throttle(datos) or (2 ** intento)
+                log(f"  Shopify sin puntos disponibles, espero {espera:.1f}s")
+                time.sleep(espera)
+                continue
+            if "MAX_COST_EXCEEDED" in codigos:
+                # Deterministico: reintentar es un bucle infinito.
+                raise RuntimeError(
+                    f"La consulta a Shopify es demasiado cara y siempre lo sera: {errores}. "
+                    f"Baja los 'first:' de CONSULTA_CATALOGO."
+                )
+            raise RuntimeError(f"Shopify GraphQL: {errores}")
         return datos["data"]
-    raise RuntimeError("Shopify sigue respondiendo 429 despues de 4 intentos")
+    raise RuntimeError(f"Shopify no respondio bien despues de {REINTENTOS_SHOPIFY} intentos")
 
 
+def _espera_por_throttle(datos: dict) -> float | None:
+    """Segundos a esperar segun el estado del bucket que informa Shopify."""
+    try:
+        estado = datos["extensions"]["cost"]["throttleStatus"]
+        faltan = datos["extensions"]["cost"]["requestedQueryCost"] - estado["currentlyAvailable"]
+        return max(1.0, faltan / estado["restoreRate"])
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+
+
+# Shopify rechaza cualquier consulta que pida mas de 1000 puntos, y lo hace
+# ANTES de ejecutarla. 100 productos x 20 variantes pedia ~2300 y fallaba
+# siempre. Con 50 x 10 el costo pedido es ~650.
 CONSULTA_CATALOGO = """
 query catalogo($cursor: String) {
-  products(first: 100, after: $cursor) {
+  products(first: 50, after: $cursor) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
       title
       status
-      variants(first: 20) {
+      variants(first: 10) {
         nodes { id title price compareAtPrice }
       }
     }
@@ -750,6 +1014,7 @@ def leer_catalogo() -> list[dict]:
             break
         cursor = bloque["pageInfo"]["endCursor"]
         log(f"  catalogo: {len(productos)} productos leidos...")
+        time.sleep(PAUSA_ENTRE_LLAMADAS)
     return productos
 
 
@@ -772,6 +1037,68 @@ def aplicar_precios(producto_id: str, variantes: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------
 # REPORTES
 # ---------------------------------------------------------------------------
+
+def cargar_estado(ruta: Path | None = None) -> dict:
+    """Que juegos estaban en oferta la corrida anterior y a que precio normal."""
+    ruta = ruta or ARCHIVO_ESTADO
+    if not ruta.exists():
+        return {}
+    try:
+        return json.loads(ruta.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        log(f"aviso: no pude leer {ruta.name} ({e}); arranco con estado vacio")
+        return {}
+
+
+def guardar_estado(previo: dict, en_oferta: list[JuegoPS], mapeo: dict[str, FilaMapeo],
+                   ruta: Path | None = None) -> None:
+    ruta = ruta or ARCHIVO_ESTADO
+    nuevo = {}
+    for j in en_oferta:
+        fila = buscar_en_mapeo(mapeo, j)
+        if not fila or not fila.activo:
+            continue
+        nuevo[normalizar(j.nombre)] = {
+            "ps_nombre": j.nombre,
+            "producto_id": fila.producto_id,
+            "precio_normal_ps": str(j.precio_normal) if j.precio_normal is not None else "",
+            "precio_oferta_ps": str(j.precio_oferta) if j.precio_oferta is not None else "",
+            "fecha": f"{datetime.now():%Y-%m-%d}",
+        }
+    try:
+        ruta.write_text(json.dumps(nuevo, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        log(f"aviso: no pude guardar {ruta.name} ({e})")
+
+
+def detectar_salidas_de_oferta(previo: dict, en_oferta: list[JuegoPS],
+                               mapeo: dict[str, FilaMapeo]) -> list[dict]:
+    """Juegos que estaban en oferta y ya no lo estan.
+
+    El sistema solo BAJA precios: cuando PS Store termina una promocion, nadie
+    devuelve el precio normal en Shopify y el juego se queda rebajado para
+    siempre. No lo revertimos solos (seria escribir precios que nadie reviso),
+    pero si lo dejamos anotado en revisar_*.csv con el precio al que estaba.
+    """
+    siguen = {normalizar(j.nombre) for j in en_oferta}
+    salidas = []
+    for clave, datos in previo.items():
+        if clave in siguen:
+            continue
+        fila = mapeo.get(clave)
+        if not fila or not fila.activo:
+            continue
+        salidas.append({
+            "motivo": "salio de oferta: revisa el precio en Shopify",
+            "ps_nombre": datos.get("ps_nombre", clave),
+            "precio_ps": datos.get("precio_normal_ps", ""),
+            "detalle": f"estaba a {datos.get('precio_oferta_ps', '?')} el "
+                       f"{datos.get('fecha', '?')}; producto {datos.get('producto_id', '?')}",
+        })
+    if salidas:
+        log(f"{len(salidas)} juego(s) salieron de oferta: van a revisar_*.csv")
+    return salidas
+
 
 def escribir_csv(ruta: Path, campos: list[str], filas: Iterable[dict]) -> Path:
     ruta.parent.mkdir(parents=True, exist_ok=True)
@@ -802,7 +1129,7 @@ def modo_diagnostico(args) -> int:
         destino_html.write_text(driver.page_source, encoding="utf-8")
         log(f"HTML renderizado guardado en {destino_html}")
 
-        estado = driver.execute_script(JS_APOLLO)
+        estado = leer_apollo(driver)
         if estado:
             destino_json = destino_html.with_suffix(".apollo.json")
             destino_json.write_text(json.dumps(estado, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -881,6 +1208,14 @@ def modo_bootstrap(args) -> int:
         headless=not args.ver_navegador,
         solo_categoria=args.categoria,
     )
+    if getattr(todos, "paginas_dom", 0):
+        # El plan B no trae clasificacion ni ids fiables: un mapeo construido
+        # con esos datos queda mal desde el dia uno.
+        log("")
+        log(f"NO construyo el mapeo: {todos.paginas_dom} pagina(s) se leyeron con el plan B "
+            f"(DOM), que no trae clasificacion de producto ni ids de PS Store.")
+        log("Arregla primero la extraccion con --diagnostico y vuelve a intentar.")
+        return 2
     juegos = [j for j in todos if es_juego_completo(j)[0]]
     log(f"{len(juegos)} juegos completos en PS Store")
 
@@ -916,7 +1251,9 @@ def modo_bootstrap(args) -> int:
             continue
         seguras.append(
             {
-                "ps_id": j.ps_id,
+                # Solo propagamos ids que vengan de Apollo: los del plan B no
+                # identifican al juego y envenenarian mapeo.csv.
+                "ps_id": j.ps_id if (j.origen == "apollo" and _id_confiable(j.ps_id)) else "",
                 "ps_nombre": j.nombre,
                 "producto_id": producto["id"],
                 "variante_primaria": primaria["id"],
@@ -950,18 +1287,53 @@ def modo_bootstrap(args) -> int:
 def modo_fusionar_mapeo(ruta_propuesta: Path) -> int:
     if not ruta_propuesta.exists():
         raise SystemExit(f"No existe {ruta_propuesta}")
+
+    with ruta_propuesta.open(encoding="utf-8-sig", newline="") as fh:
+        lector = csv.DictReader(fh)
+        columnas = set(lector.fieldnames or [])
+        obligatorias = {"ps_nombre", "producto_id", "variante_primaria", "variante_secundaria"}
+        faltan = obligatorias - columnas
+        if faltan:
+            # Sin esto, pasarle un revisar_*.csv por equivocacion agregaba filas
+            # sin ids: los juegos quedaban "mapeados" a la nada y no volvian a
+            # aparecer nunca mas en los reportes.
+            raise SystemExit(
+                f"{ruta_propuesta.name} no parece un mapeo_propuesto_*.csv: le faltan las "
+                f"columnas {', '.join(sorted(faltan))}.\n"
+                f"Usa uno de los archivos reportes/mapeo_propuesto_*.csv que genera --bootstrap."
+            )
+        filas_crudas = list(lector)
+
     respaldar(ARCHIVO_MAPEO)
     existentes = cargar_mapeo()
-    nuevas = []
-    with ruta_propuesta.open(encoding="utf-8-sig", newline="") as fh:
-        for fila in csv.DictReader(fh):
-            if normalizar(fila.get("ps_nombre", "")) in existentes:
-                continue
-            nuevas.append({c: fila.get(c, "") for c in CAMPOS_MAPEO})
+    nuevas: list[dict] = []
+    nombres_del_archivo: set[str] = set()
+    for fila in filas_crudas:
+        nombre = normalizar(fila.get("ps_nombre", ""))
+        if not nombre or nombre in existentes or nombre in nombres_del_archivo:
+            continue
+        limpia = {c: (fila.get(c) or "").strip() for c in CAMPOS_MAPEO}
+        if not _id_confiable(limpia["ps_id"]):
+            limpia["ps_id"] = ""   # nunca dejar entrar un id posicional
+        if not limpia["activo"]:
+            limpia["activo"] = "si"
+        nombres_del_archivo.add(nombre)
+        nuevas.append(limpia)
+
     if not nuevas:
         log("No hay filas nuevas que agregar.")
         return 0
+
     nuevo_archivo = not ARCHIVO_MAPEO.exists()
+    if not nuevo_archivo:
+        # Si el archivo no termina en salto de linea, un append pega la fila
+        # nueva sobre la ultima y se pierden las dos.
+        contenido = ARCHIVO_MAPEO.read_bytes()
+        if contenido and not contenido.endswith(b"\n"):
+            with ARCHIVO_MAPEO.open("ab") as fh:
+                fh.write(b"\r\n")
+            log(f"{ARCHIVO_MAPEO.name} no terminaba en salto de linea: se lo agregue")
+
     with ARCHIVO_MAPEO.open("a", encoding="utf-8-sig", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=CAMPOS_MAPEO)
         if nuevo_archivo:
@@ -983,19 +1355,33 @@ def modo_principal(args) -> int:
     mapeo = cargar_mapeo()
     log(f"{len(tramos)} tramos de precio, {len({id(v) for v in mapeo.values()})} juegos mapeados")
 
-    juegos = raspar_todo(
+    resultado = raspar_todo(
         paginas_max=args.paginas,
         headless=not args.ver_navegador,
         solo_categoria=args.categoria,
     )
+    juegos = list(resultado)
+    paginas_con_error = getattr(resultado, "paginas_error", 0)
     log(f"{len(juegos)} productos unicos extraidos")
+
+    if not juegos:
+        # Antes esto devolvia 0 y correr.sh anunciaba "listo, 0 precios
+        # actualizados": un fallo total del scraper se veia igual que una
+        # quincena sin ofertas.
+        log("NO SE EXTRAJO NI UN PRODUCTO. Algo esta roto: Chrome no arranco, "
+            "PS Store cambio su estructura, o la red esta bloqueada.")
+        log("Corre 'python3 cjm_precios_ps.py --diagnostico' para ver que paso.")
+        return 2
 
     completos = [j for j in juegos if es_juego_completo(j)[0]]
     log(f"{len(completos)} son juegos completos")
     en_oferta = [j for j in completos if j.en_oferta]
     log(f"{len(en_oferta)} estan en oferta")
 
+    estado_previo = cargar_estado()
     cambios, revisar = [], []
+    revisar.extend(detectar_salidas_de_oferta(estado_previo, en_oferta, mapeo))
+
     for j in en_oferta:
         if j.moneda and j.moneda.upper() != MONEDA_ESPERADA:
             revisar.append({"motivo": f"moneda inesperada ({j.moneda})", "ps_nombre": j.nombre,
@@ -1007,6 +1393,12 @@ def modo_principal(args) -> int:
                             "precio_ps": j.precio_referencia, "detalle": j.descuento or ""})
             continue
         if not fila.activo:
+            continue
+        if fila.problema:
+            # Un id mal pegado no es un userError: es un error de GraphQL que
+            # mata la corrida entera. Lo atajamos antes de llamar a Shopify.
+            revisar.append({"motivo": "id de Shopify mal formado", "ps_nombre": j.nombre,
+                            "precio_ps": j.precio_referencia, "detalle": fila.problema})
             continue
         tramo = buscar_tramo(tramos, j.precio_referencia)
         if not tramo:
@@ -1035,45 +1427,82 @@ def modo_principal(args) -> int:
                 }
             )
 
-    sello = f"{datetime.now():%Y%m%d-%H%M}"
-    if aplicar:
-        log(f"APLICANDO {len(cambios)} cambios en Shopify...")
-        por_producto: dict[str, list[dict]] = {}
-        for c in cambios:
-            por_producto.setdefault(c["producto_id"], []).append(c)
-        for producto_id, lista in por_producto.items():
-            variantes = []
-            for c in lista:
-                v = {"id": c["variante_id"], "price": str(c["precio_nuevo"])}
-                if c["compare_at"]:
-                    v["compareAtPrice"] = str(c["compare_at"])
-                variantes.append(v)
-            errores = aplicar_precios(producto_id, variantes)
-            for c in lista:
-                c["estado"] = "error: " + "; ".join(errores) if errores else "aplicado"
-            if errores:
-                log(f"  {producto_id}: {errores}")
-    else:
-        for c in cambios:
-            c["estado"] = "simulado"
-        log("MODO SIMULACION: no se escribio nada en Shopify (usa --aplicar para escribir)")
+    # Segundos en el sello: dos corridas en el mismo minuto se pisaban el
+    # reporte, y con --aplicar eso borra la evidencia de lo que ya se escribio.
+    sello = f"{datetime.now():%Y%m%d-%H%M%S}"
+    interrumpido: Exception | None = None
 
-    ruta_cambios = escribir_csv(
-        REPORTES / f"cambios_{sello}.csv",
-        ["producto_id", "variante_id", "variante", "ps_nombre", "precio_ps_normal",
-         "precio_ps_oferta", "precio_nuevo", "compare_at", "estado"],
-        cambios,
-    )
-    ruta_revisar = escribir_csv(
-        REPORTES / f"revisar_{sello}.csv",
-        ["motivo", "ps_nombre", "precio_ps", "detalle"],
-        revisar,
-    )
-    log(f"\nResumen: {len(cambios)} cambios -> {ruta_cambios.name}")
-    log(f"         {len(revisar)} para revisar -> {ruta_revisar.name}")
-    errores = [c for c in cambios if str(c["estado"]).startswith("error")]
-    if errores:
-        log(f"         {len(errores)} con error al aplicar")
+    try:
+        if aplicar:
+            log(f"APLICANDO {len(cambios)} cambios en Shopify...")
+            por_producto: dict[str, list[dict]] = {}
+            for c in cambios:
+                por_producto.setdefault(c["producto_id"], []).append(c)
+
+            fallos_seguidos = 0
+            for numero, (producto_id, lista) in enumerate(por_producto.items(), start=1):
+                variantes = []
+                for c in lista:
+                    v = {"id": c["variante_id"], "price": str(c["precio_nuevo"])}
+                    if c["compare_at"]:
+                        v["compareAtPrice"] = str(c["compare_at"])
+                    variantes.append(v)
+                try:
+                    errores = aplicar_precios(producto_id, variantes)
+                except Exception as e:  # noqa: BLE001 - un producto no tumba la corrida
+                    errores = [f"excepcion: {type(e).__name__}: {e}"]
+                for c in lista:
+                    c["estado"] = "error: " + "; ".join(errores) if errores else "aplicado"
+                if errores:
+                    fallos_seguidos += 1
+                    log(f"  {producto_id}: {errores}")
+                    if fallos_seguidos >= FALLOS_SEGUIDOS_MAX:
+                        log(f"  {FALLOS_SEGUIDOS_MAX} productos seguidos con error: corto aca "
+                            f"y escribo el reporte con lo hecho")
+                        break
+                else:
+                    fallos_seguidos = 0
+                if numero < len(por_producto):
+                    time.sleep(PAUSA_ENTRE_LLAMADAS)
+        else:
+            for c in cambios:
+                c["estado"] = "simulado"
+            log("MODO SIMULACION: no se escribio nada en Shopify (usa --aplicar para escribir)")
+    except BaseException as e:  # noqa: BLE001
+        # Pase lo que pase (incluido Ctrl-C), los reportes se escriben: son la
+        # unica forma de saber que precios alcanzaron a cambiar en la tienda.
+        interrumpido = e
+    finally:
+        ruta_cambios = escribir_csv(
+            REPORTES / f"cambios_{sello}.csv",
+            ["producto_id", "variante_id", "variante", "ps_nombre", "precio_ps_normal",
+             "precio_ps_oferta", "precio_nuevo", "compare_at", "estado"],
+            cambios,
+        )
+        ruta_revisar = escribir_csv(
+            REPORTES / f"revisar_{sello}.csv",
+            ["motivo", "ps_nombre", "precio_ps", "detalle"],
+            revisar,
+        )
+        log(f"\nResumen: {len(cambios)} cambios -> {ruta_cambios.name}")
+        log(f"         {len(revisar)} para revisar -> {ruta_revisar.name}")
+
+    if interrumpido is not None:
+        log(f"LA CORRIDA SE CORTO: {type(interrumpido).__name__}: {interrumpido}")
+        log(f"Mira {ruta_cambios.name}: la columna 'estado' dice que alcanzo a aplicarse.")
+        if isinstance(interrumpido, KeyboardInterrupt):
+            raise interrumpido
+        return 1
+
+    guardar_estado(estado_previo, en_oferta, mapeo)
+
+    con_error = [c for c in cambios if str(c["estado"]).startswith("error")]
+    if con_error:
+        log(f"         {len(con_error)} con error al aplicar")
+        return 1
+    if paginas_con_error:
+        log(f"         OJO: {paginas_con_error} pagina(s) de PS Store nunca cargaron; "
+            f"el recorrido quedo incompleto")
         return 1
     return 0
 

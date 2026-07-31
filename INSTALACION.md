@@ -42,6 +42,8 @@ store.playstation.com/es-cl
 | `.replit` / `replit.nix` | Configuración de Replit: Python, Chromium y chromedriver. |
 | `pruebas_offline.py` | 55 pruebas de la lógica pura. |
 | `pruebas_integracion.py` | 37 pruebas de Selenium y Shopify con dobles. |
+| `pruebas_regresion.py` | 64 pruebas, una por cada bug ya corregido. |
+| `estado.json` | Qué juegos estaban en oferta la corrida anterior. Se genera solo. |
 | `reportes/` | Salidas de cada corrida. No se versiona. |
 
 ### Los tres candados antes de escribir en Shopify
@@ -103,12 +105,16 @@ export CJM_SHOPIFY_TIENDA="tu-tienda.myshopify.com"
 ```bash
 python3 pruebas_offline.py       # 55 pruebas de logica pura
 python3 pruebas_integracion.py   # 37 pruebas de Selenium y Shopify con dobles
+python3 pruebas_regresion.py     # 64 pruebas, una por cada bug ya corregido
 ```
 
-92 pruebas en total: precios, filtro, tramos, mapeo, los dos caminos de
+156 pruebas en total: precios, filtro, tramos, mapeo, los dos caminos de
 extracción (Apollo y DOM), reintentos, la paginación del catálogo de Shopify, la
 mutación de precios y los tres candados. **Ninguna abre Chrome ni toca internet
 ni escribe en Shopify**, así que se pueden correr siempre que cambies algo.
+
+`pruebas_regresion.py` es especial: cada bloque documenta un bug que ya ocurrió
+y explica qué pasaba antes. Si uno se pone rojo, volvió algo que costó encontrar.
 
 ### Paso 1 — Diagnóstico del sitio (lo primero, siempre)
 
@@ -271,6 +277,20 @@ launchctl unload ~/Library/LaunchAgents/com.cjm.precios.plist
 **Cada quincena**, revisa `reportes/revisar_*.csv`. Los "juego nuevo sin mapear"
 son juegos que salieron en oferta y todavía no están en `mapeo.csv`: corre
 `--bootstrap`, revisa las propuestas y fusiona.
+
+### ⚠️ El sistema solo BAJA precios
+
+Cuando PS Store termina una promoción, **nadie devuelve el precio normal en
+Shopify**: el juego se queda rebajado. El script no lo revierte solo, porque
+sería escribir precios que nadie revisó.
+
+Lo que sí hace: guarda en `estado.json` qué juegos estaban en oferta y a qué
+precio normal, y cuando uno desaparece de las ofertas lo reporta en
+`revisar_*.csv` con el motivo **"salió de oferta: revisa el precio en Shopify"**
+y el precio original. Esas filas son tu lista de tareas manual cada quincena.
+
+Si borras `estado.json`, se pierde la memoria y esos avisos no salen hasta la
+siguiente vuelta completa.
 
 **Si una corrida devuelve 0 productos por página**, PS Store cambió su HTML.
 Corre `--diagnostico --ver-navegador`, mira el HTML guardado y ajusta la
