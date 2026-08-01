@@ -28,6 +28,11 @@ from flask import (Flask, abort, flash, g, redirect, render_template, request,
 from werkzeug.security import check_password_hash, generate_password_hash
 
 RAIZ = Path(__file__).resolve().parent.parent
+if str(RAIZ) not in sys.path:
+    sys.path.insert(0, str(RAIZ))
+
+# Reutilizamos la misma logica de filtrado del scraper (una sola fuente de verdad).
+from cjm_precios_ps import PALABRAS_DESCARTE, normalizar  # noqa: E402
 DB_SQLITE_VIEJA = Path(__file__).resolve().parent / "usuarios.db"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
@@ -269,6 +274,31 @@ def leer_csv(nombre: str) -> tuple[list[str], list[list[str]]]:
     return filas[0], filas[1:501]
 
 
+# Filtro pedido por la clienta: en los reportes "revisar" poder ocultar
+# DLC, monedas, mapas, packs y otros extras que no son juegos completos.
+def _fila_es_extra(nombre_juego: str) -> bool:
+    nombre = normalizar(nombre_juego)
+    for palabra in PALABRAS_DESCARTE:
+        # Palabra completa, no substring: 'demo' NO descarta "Demon's Souls".
+        patron = rf"(?<![a-z0-9]){re.escape(normalizar(palabra))}(?![a-z0-9])"
+        if re.search(patron, nombre):
+            return True
+    return False
+
+
+def filtrar_extras(encabezado: list[str], filas: list[list[str]]) -> tuple[list[list[str]], int]:
+    """Devuelve (filas sin extras, cuantas se ocultaron). Usa la columna del nombre."""
+    try:
+        col = encabezado.index("ps_nombre")
+    except ValueError:
+        try:
+            col = encabezado.index("nombre")
+        except ValueError:
+            return filas, 0
+    limpias = [f for f in filas if len(f) <= col or not _fila_es_extra(f[col])]
+    return limpias, len(filas) - len(limpias)
+
+
 # ---------------------------------------------------------------- rutas
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -341,7 +371,43 @@ def scraper_estado():
 @requiere_login
 def ver_reporte(nombre: str):
     encabezado, filas = leer_csv(nombre)
-    return render_template("reporte.html", nombre=nombre, encabezado=encabezado, filas=filas)
+    filtrable = nombre.startswith("revisar_")
+    mostrar_todo = request.args.get("todo") == "1"
+    ocultados = 0
+    if filtrable and not mostrar_todo:
+        filas, ocultados = filtrar_extras(encabezado, filas)
+    return render_template(
+        "reporte.html",
+        nombre=nombre,
+        encabezado=encabezado,
+        filas=filas,
+        filtrable=filtrable,
+        mostrar_todo=mostrar_todo,
+        ocultados=ocultados,
+    )
+
+
+@app.route("/reporte/<nombre>/descargar")
+@requiere_login
+def descargar_reporte(nombre: str):
+    if not re.fullmatch(r"[\w.\-]+\.csv", nombre):
+        abort(404)
+    filas_db = consulta("SELECT contenido FROM reportes WHERE nombre = %s", (nombre,))
+    if not filas_db:
+        abort(404)
+    contenido = filas_db[0]["contenido"]
+    if nombre.startswith("revisar_") and request.args.get("todo") != "1":
+        todas = list(csv.reader(io.StringIO(contenido)))
+        if todas:
+            limpias, _ = filtrar_extras(todas[0], todas[1:])
+            salida = io.StringIO()
+            csv.writer(salida).writerows([todas[0]] + limpias)
+            contenido = salida.getvalue()
+    return app.response_class(
+        contenido,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={nombre}"},
+    )
 
 
 # ---------------------------------------------------------------- usuarios (superadmin)
