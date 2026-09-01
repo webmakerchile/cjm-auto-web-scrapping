@@ -561,7 +561,7 @@ def desde_dom(driver) -> list[JuegoPS]:
             if not nombre or "$" in nombre:
                 continue
 
-            precios = [l for l in lineas if "$" in l]
+            precios = [l for l in lineas if l.count("$") == 1]
             if len(precios) > 2:
                 # Tres precios = hay un precio de PS Plus de por medio. No
                 # sabemos cual de los dos rebajados aplica, y adivinar publica
