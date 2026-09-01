@@ -1209,13 +1209,21 @@ def modo_bootstrap(args) -> int:
         solo_categoria=args.categoria,
     )
     if getattr(todos, "paginas_dom", 0):
-        # El plan B no trae clasificacion ni ids fiables: un mapeo construido
-        # con esos datos queda mal desde el dia uno.
+        # El plan B (DOM) no trae la clasificacion de producto, pero el id de
+        # PS Store si viene en el enlace de cada ficha. Nos plantamos solo si
+        # los ids faltan de verdad: sin ellos el mapeo no sirve de nada.
+        sin_id = [j for j in todos.juegos if not _id_confiable(j.ps_id)]
+        if sin_id:
+            log("")
+            log(f"NO construyo el mapeo: {len(sin_id)} de {len(todos.juegos)} productos "
+                f"vienen sin id de PS Store utilizable.")
+            log("Arregla primero la extraccion con --diagnostico y vuelve a intentar.")
+            return 2
         log("")
-        log(f"NO construyo el mapeo: {todos.paginas_dom} pagina(s) se leyeron con el plan B "
-            f"(DOM), que no trae clasificacion de producto ni ids de PS Store.")
-        log("Arregla primero la extraccion con --diagnostico y vuelve a intentar.")
-        return 2
+        log(f"AVISO: {todos.paginas_dom} pagina(s) se leyeron con el plan B (DOM). Los ids "
+            f"de PS Store vienen completos, pero NO hay clasificacion de producto: el filtro "
+            f"de DLC queda solo por palabras del titulo.")
+        log("Revisa a mano el mapeo_propuesto_*.csv antes de fusionarlo.")
     juegos = [j for j in todos if es_juego_completo(j)[0]]
     log(f"{len(juegos)} juegos completos en PS Store")
 
@@ -1251,9 +1259,9 @@ def modo_bootstrap(args) -> int:
             continue
         seguras.append(
             {
-                # Solo propagamos ids que vengan de Apollo: los del plan B no
-                # identifican al juego y envenenarian mapeo.csv.
-                "ps_id": j.ps_id if (j.origen == "apollo" and _id_confiable(j.ps_id)) else "",
+                # Propagamos cualquier id que pase _id_confiable: tanto Apollo
+                # como el plan B (enlace de la ficha) dan ids reales de PS Store.
+                "ps_id": j.ps_id if _id_confiable(j.ps_id) else "",
                 "ps_nombre": j.nombre,
                 "producto_id": producto["id"],
                 "variante_primaria": primaria["id"],
