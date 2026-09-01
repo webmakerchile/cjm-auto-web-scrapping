@@ -77,7 +77,7 @@ URL_CATEGORIA = "https://store.playstation.com/{locale}/category/{cat}/{pagina}"
 MONEDA_ESPERADA = "CLP"
 
 # Shopify
-TIENDA = os.environ.get("CJM_SHOPIFY_TIENDA", "cjm-digitales.myshopify.com")
+TIENDA = os.environ.get("CJM_SHOPIFY_TIENDA", "cjmdigitales.myshopify.com")
 # Shopify soporta cada version por 12 meses. Si esta expira, la API sirve otra
 # version en silencio y el comportamiento puede cambiar sin avisar: convive
 # revisar https://shopify.dev/docs/api/usage/versioning una vez al ano.
@@ -871,6 +871,60 @@ def respaldar(ruta: Path) -> Path | None:
 # SHOPIFY
 # ---------------------------------------------------------------------------
 
+_TOKEN_CREDENCIALES: str | None = None
+
+
+def _token_por_credenciales() -> str | None:
+    """Pide el token a Shopify con el client credentials grant.
+
+    Es el camino que Shopify deja para una app propia que actua sobre una
+    tienda de la misma organizacion: la app cambia su client id y su secreto
+    por un token, sin instalacion manual y sin que el token se muestre nunca
+    en el admin. Dura 24 horas, por eso se pide en cada corrida.
+
+    Devuelve None si no hay credenciales configuradas, para que los caminos
+    viejos (variable de entorno, Llavero de macOS) sigan funcionando igual.
+    """
+    global _TOKEN_CREDENCIALES
+    if _TOKEN_CREDENCIALES:
+        return _TOKEN_CREDENCIALES
+    cliente = (os.environ.get("CJM_SHOPIFY_CLIENT_ID") or "").strip()
+    secreto = (os.environ.get("CJM_SHOPIFY_CLIENT_SECRET") or "").strip()
+    if not cliente or not secreto:
+        return None
+
+    import requests
+
+    tienda = _validar_tienda()
+    try:
+        r = requests.post(
+            f"https://{tienda}/admin/oauth/access_token",
+            json={
+                "client_id": cliente,
+                "client_secret": secreto,
+                "grant_type": "client_credentials",
+            },
+            timeout=30,
+            allow_redirects=False,
+        )
+    except Exception as e:
+        raise SystemExit(f"No pude pedirle el token a Shopify: {e}")
+    if r.status_code != 200:
+        raise SystemExit(
+            f"Shopify rechazo las credenciales de la app (HTTP {r.status_code}).\n"
+            "Revisa CJM_SHOPIFY_CLIENT_ID y CJM_SHOPIFY_CLIENT_SECRET, y que la "
+            "app este instalada en la tienda."
+        )
+    try:
+        token = (r.json() or {}).get("access_token", "")
+    except ValueError:
+        token = ""
+    if not token:
+        raise SystemExit("Shopify respondio sin access_token.")
+    _TOKEN_CREDENCIALES = token
+    return token
+
+
 def _token() -> str:
     """Token de Shopify. Nunca se guarda en disco ni se imprime.
 
@@ -880,6 +934,9 @@ def _token() -> str:
     del_entorno = os.environ.get("CJM_SHOPIFY_TOKEN")
     if del_entorno:
         return del_entorno.strip()
+    por_credenciales = _token_por_credenciales()
+    if por_credenciales:
+        return por_credenciales
     try:
         salida = subprocess.run(
             ["security", "find-generic-password", "-s", SERVICIO_LLAVERO, "-w"],

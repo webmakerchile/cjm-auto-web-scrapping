@@ -50,3 +50,8 @@ outputType = "webview"
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 180000
+
+[userenv]
+
+[userenv.shared]
+CJM_SHOPIFY_CLIENT_ID = "c2e6743d495edc5b8e2c95552d0265ca"
