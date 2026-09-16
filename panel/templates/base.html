@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CJM Precios PS — Panel</title>
+<style>
+:root { --azul:#00439c; --fondo:#f4f6fb; --borde:#d8deea; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:var(--fondo); color:#1c2333; }
+header { background:var(--azul); color:#fff; padding:.7rem 1.2rem; display:flex; align-items:center; gap:1rem; flex-wrap:wrap; }
+header .marca { font-weight:700; }
+header a { color:#cfe0ff; text-decoration:none; }
+header a:hover { color:#fff; }
+header .der { margin-left:auto; font-size:.9rem; }
+main { max-width:960px; margin:1.5rem auto; padding:0 1rem; }
+.tarjeta { background:#fff; border:1px solid var(--borde); border-radius:10px; padding:1.2rem 1.4rem; margin-bottom:1.2rem; }
+h1,h2 { margin-top:0; }
+.aviso { background:#fff4d6; border:1px solid #e8c96a; padding:.6rem .9rem; border-radius:8px; margin-bottom:1rem; }
+button, .boton { background:var(--azul); color:#fff; border:0; border-radius:8px; padding:.55rem 1.1rem; font-size:1rem; cursor:pointer; }
+button:disabled { background:#9db4d6; cursor:wait; }
+button.rojo { background:#b02a2a; }
+button.gris { background:#5a6a85; }
+input { padding:.5rem .7rem; border:1px solid var(--borde); border-radius:8px; font-size:1rem; width:100%; }
+label { display:block; margin:.6rem 0 .2rem; font-size:.9rem; color:#44506a; }
+table { width:100%; border-collapse:collapse; font-size:.9rem; }
+th,td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--borde); }
+tr:hover td { background:#f7f9fe; }
+pre.log { background:#101728; color:#c7d4ef; padding:1rem; border-radius:8px; max-height:420px; overflow:auto; font-size:.82rem; white-space:pre-wrap; }
+.pill { display:inline-block; padding:.1rem .55rem; border-radius:99px; font-size:.78rem; }
+.pill.ok { background:#dcf3e3; color:#186a37; }
+.pill.mal { background:#fbdcdc; color:#8c1d1d; }
+.fila-form { display:flex; gap:.8rem; align-items:end; flex-wrap:wrap; }
+.fila-form > div { flex:1; min-width:180px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="marca">CJM Precios PS</span>
+  {% if session.get('email') %}
+    <a href="{{ url_for('inicio') }}">Inicio</a>
+    {% if session['email'] == 'webmakerchile@gmail.com' %}<a href="{{ url_for('usuarios') }}">Usuarios</a>{% endif %}
+    <span class="der">{{ session['email'] }} · <a href="{{ url_for('salir') }}">Salir</a></span>
+  {% endif %}
+</header>
+<main>
+  {% with mensajes = get_flashed_messages() %}
+    {% for m in mensajes %}<div class="aviso">{{ m }}</div>{% endfor %}
+  {% endwith %}
+  {% block contenido %}{% endblock %}
+</main>
+</body>
+</html>

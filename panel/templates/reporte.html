@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block contenido %}
+<div class="tarjeta">
+  <h1>{{ nombre }}</h1>
+  {% if encabezado %}
+  <p>
+    {% if not filtrable %}
+      <a href="{{ url_for('descargar_reporte', nombre=nombre) }}">Descargar CSV</a>
+    {% elif mostrar_todo %}
+      Viendo todo, incluidos DLC, monedas, mapas y otros extras.
+      <a href="{{ url_for('ver_reporte', nombre=nombre) }}">Ocultar extras</a>
+    {% else %}
+      Solo juegos ({{ ocultados }} fila{{ 's' if ocultados != 1 }} de DLC, monedas, mapas u otros extras ocultas).
+      <a href="{{ url_for('ver_reporte', nombre=nombre, todo=1) }}">Ver todo</a>
+    {% endif %}
+    &nbsp;·&nbsp;
+    <a href="{{ url_for('descargar_reporte', nombre=nombre) }}">Descargar CSV solo juegos</a>
+    &nbsp;·&nbsp;
+    <a href="{{ url_for('descargar_reporte', nombre=nombre, todo=1) }}">Descargar CSV completo</a>
+  </p>
+  <div style="overflow-x:auto;">
+  <table>
+    <tr>{% for c in encabezado %}<th>{{ c }}</th>{% endfor %}</tr>
+    {% for f in filas %}
+    <tr>{% for c in f %}<td>{{ c }}</td>{% endfor %}</tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% if filas|length == 0 %}<p>El reporte está vacío (solo encabezado).</p>{% endif %}
+  {% else %}
+  <p>Archivo vacío.</p>
+  {% endif %}
+  <p><a href="{{ url_for('inicio') }}">← Volver</a></p>
+</div>
+{% endblock %}

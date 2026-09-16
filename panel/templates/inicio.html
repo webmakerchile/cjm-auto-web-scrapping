@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block contenido %}
+<div class="tarjeta">
+  <h1>Scraping de ofertas PS Store</h1>
+  <p>Corre el scraper en <strong>modo simulación</strong> (<code>--solo-simular</code>): lee las ofertas de
+     PS Store y genera los reportes, <strong>sin escribir nada en Shopify</strong>.</p>
+  <form method="post" action="{{ url_for('scraper_correr') }}" class="fila-form" id="form-correr">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div style="max-width:220px;">
+      <label for="paginas">Páginas por categoría (vacío = todas)</label>
+      <input id="paginas" name="paginas" type="number" min="1" max="150" placeholder="ej. 3">
+    </div>
+    <div style="flex:0;">
+      <button type="submit" id="boton-correr" {% if corrida.activa %}disabled{% endif %}>
+        {% if corrida.activa %}Corriendo…{% else %}▶ Correr scraping{% endif %}
+      </button>
+    </div>
+  </form>
+</div>
+
+<div class="tarjeta" id="tarjeta-log" {% if not corrida.inicio %}style="display:none"{% endif %}>
+  <h2>Corrida
+    {% if corrida.inicio %}<small style="font-weight:400;">(inicio {{ corrida.inicio }}{% if corrida.fin %} · fin {{ corrida.fin }}{% endif %})</small>{% endif %}
+    <span id="estado-pill"></span>
+  </h2>
+  <pre class="log" id="log">{{ corrida.log | join('\n') }}</pre>
+</div>
+
+<div class="tarjeta">
+  <h2>Reportes recientes</h2>
+  {% if reportes %}
+  <table>
+    <tr><th>Archivo</th><th>Fecha</th><th></th></tr>
+    {% for r in reportes %}
+    <tr>
+      <td>{{ r.nombre }}</td>
+      <td>{{ r.modificado }}</td>
+      <td>{% if r.nombre.endswith('.csv') %}<a href="{{ url_for('ver_reporte', nombre=r.nombre) }}">ver</a>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>Todavía no hay reportes. Corre el scraping para generarlos.</p>
+  {% endif %}
+</div>
+
+<script>
+const activaInicial = {{ 'true' if corrida.activa else 'false' }};
+async function refrescar() {
+  const r = await fetch("{{ url_for('scraper_estado') }}");
+  if (!r.ok) return;
+  const d = await r.json();
+  const log = document.getElementById('log');
+  const tarjeta = document.getElementById('tarjeta-log');
+  const boton = document.getElementById('boton-correr');
+  const pill = document.getElementById('estado-pill');
+  if (d.inicio) tarjeta.style.display = '';
+  log.textContent = d.log.join('\n');
+  log.scrollTop = log.scrollHeight;
+  if (d.activa) {
+    boton.disabled = true; boton.textContent = 'Corriendo…';
+    pill.innerHTML = '<span class="pill ok">en curso</span>';
+    setTimeout(refrescar, 2000);
+  } else {
+    boton.disabled = false; boton.textContent = '▶ Correr scraping';
+    if (d.codigo !== null) {
+      pill.innerHTML = d.codigo === 0
+        ? '<span class="pill ok">terminó bien</span>'
+        : '<span class="pill mal">terminó con avisos (código ' + d.codigo + ')</span>';
+      if (activaInicial) location.reload();  // refresca la lista de reportes
+    }
+  }
+}
+if (activaInicial) refrescar();
+</script>
+{% endblock %}
