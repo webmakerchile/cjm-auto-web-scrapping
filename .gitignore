@@ -6,7 +6,10 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
-*.html
+# OJO: antes decia "*.html" a secas y eso excluia tambien
+# panel/templates/*.html, o sea las plantillas del panel.
+# Solo queremos ignorar los HTML que vuelca el scraper.
+reportes/*.html
 .env
 .env.*
 *.token
