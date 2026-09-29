@@ -1602,6 +1602,102 @@ def main(argv: list[str] | None = None) -> int:
     return modo_principal(args)
 
 
+# ---------------------------------------------------------------------------
+# EXTRACCION POR METADATO DE TELEMETRIA (plan B, version nueva)
+# ---------------------------------------------------------------------------
+# PS Store cambio la ficha de producto: el texto visible de la tarjeta ya no
+# empieza por el nombre del juego sino por la etiqueta de plataforma ("PS5"),
+# y el selector por prefijo tambien matchea los nodos hijos de la tarjeta, por
+# eso salian 329 "tarjetas" para 24 productos y los nombres venian mal.
+#
+# El enlace de cada ficha trae un atributo data-telemetry-meta con el id real,
+# el nombre exacto y los dos precios. Leemos de ahi. Si la pagina no lo trae,
+# caemos al camino viejo por texto, que queda intacto.
+
+_desde_dom_por_texto = desde_dom
+
+
+def _meta_de_tarjeta(tarjeta) -> dict | None:
+    """Devuelve el data-telemetry-meta de una tarjeta, o None si no lo trae."""
+    from selenium.webdriver.common.by import By
+
+    try:
+        crudo = tarjeta.get_attribute("data-telemetry-meta") or ""
+    except Exception:  # noqa: BLE001
+        crudo = ""
+    if not crudo:
+        try:
+            enlace = tarjeta.find_element(By.CSS_SELECTOR, "a[data-telemetry-meta]")
+            crudo = enlace.get_attribute("data-telemetry-meta") or ""
+        except Exception:  # noqa: BLE001
+            return None
+    if not crudo:
+        return None
+    try:
+        meta = json.loads(crudo)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(meta, dict) or not meta.get("name"):
+        return None
+    return meta
+
+
+def desde_dom(driver) -> list[JuegoPS]:
+    """Plan B: leer las tarjetas renderizadas.
+
+    Primero por el metadato de telemetria, que trae el id, el nombre y los
+    precios exactos. Si la pagina no lo trae, se usa el camino viejo por
+    texto, que sigue tal cual estaba.
+    """
+    from selenium.webdriver.common.by import By
+
+    juegos: list[JuegoPS] = []
+    vistos: set[str] = set()
+    try:
+        enlaces = driver.find_elements(By.CSS_SELECTOR, "a[data-telemetry-meta]")
+    except Exception:  # noqa: BLE001
+        enlaces = []
+    for i, enlace in enumerate(enlaces):
+        try:
+            meta = _meta_de_tarjeta(enlace)
+            if not meta:
+                continue
+            nombre = str(meta.get("name") or "").strip()
+            ps_id = str(meta.get("id") or "").strip()
+            bloque = meta.get("price") or {}
+            if not isinstance(bloque, dict):
+                bloque = {}
+            normal = parse_precio(bloque.get("base"), MONEDA_ESPERADA)
+            oferta = parse_precio(bloque.get("discount"), MONEDA_ESPERADA)
+            if normal is None:
+                normal = oferta
+            if oferta is None:
+                oferta = normal
+            if not nombre or normal is None or oferta is None:
+                continue
+            clave = ps_id or normalizar(nombre)
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            juegos.append(
+                JuegoPS(
+                    ps_id=ps_id,
+                    nombre=nombre,
+                    clasificacion=None,
+                    moneda=MONEDA_ESPERADA,
+                    precio_normal=max(normal, oferta),
+                    precio_oferta=min(normal, oferta),
+                    origen="dom",
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            log(f"  tarjeta {i} ilegible (metadato): {e}")
+    if juegos:
+        log(f"  DOM: use el metadato de telemetria ({len(juegos)} productos)")
+        return juegos
+    return _desde_dom_por_texto(driver)
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
