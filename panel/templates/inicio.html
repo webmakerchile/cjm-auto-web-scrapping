@@ -4,6 +4,9 @@
   <h1>Scraping de ofertas PS Store</h1>
   <p>Corre el scraper en <strong>modo simulación</strong> (<code>--solo-simular</code>): lee las ofertas de
      PS Store y genera los reportes, <strong>sin escribir nada en Shopify</strong>.</p>
+  <p>Las ofertas quedan en el reporte <strong>«Ofertas encontradas en PS Store»</strong> (<code>revisar_…</code>).
+     El de <strong>«Precios que se cambiarían en Shopify»</strong> (<code>cambios_…</code>) sale vacío hasta que
+     los juegos queden vinculados con los productos de la tienda.</p>
   <form method="post" action="{{ url_for('scraper_correr') }}" class="fila-form" id="form-correr">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div style="max-width:220px;">
@@ -30,10 +33,16 @@
   <h2>Reportes recientes</h2>
   {% if reportes %}
   <table>
-    <tr><th>Archivo</th><th>Fecha</th><th></th></tr>
+    <tr><th>Reporte</th><th>Filas</th><th>Fecha</th><th></th></tr>
     {% for r in reportes %}
     <tr>
-      <td>{{ r.nombre }}</td>
+      <td>{% if r.tipo %}<strong>{{ r.tipo }}</strong><br>{% endif %}<small>{{ r.nombre }}</small></td>
+      <td>
+        {% if r.juegos is not none %}{{ r.juegos }} juego{{ 's' if r.juegos != 1 }}
+          <small>(de {{ r.filas }} filas, contando DLC y extras)</small>
+        {% else %}{{ r.filas }}{% endif %}
+        {% if r.filas == 0 %}<br><small>vacío{% if r.nombre.startswith('cambios_') %}: aún no hay juegos vinculados a Shopify{% endif %}</small>{% endif %}
+      </td>
       <td>{{ r.modificado }}</td>
       <td>{% if r.nombre.endswith('.csv') %}<a href="{{ url_for('ver_reporte', nombre=r.nombre) }}">ver</a>{% endif %}</td>
     </tr>
@@ -66,7 +75,9 @@ async function refrescar() {
     if (d.codigo !== null) {
       pill.innerHTML = d.codigo === 0
         ? '<span class="pill ok">terminó bien</span>'
-        : '<span class="pill mal">terminó con avisos (código ' + d.codigo + ')</span>';
+        : d.codigo === 2
+          ? '<span class="pill mal">no se extrajo ningún producto de PS Store (código 2)</span>'
+          : '<span class="pill mal">terminó con avisos (código ' + d.codigo + ')</span>';
       if (activaInicial) location.reload();  // refresca la lista de reportes
     }
   }

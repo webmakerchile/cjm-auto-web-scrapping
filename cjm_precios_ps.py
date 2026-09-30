@@ -500,7 +500,12 @@ def desde_apollo(estado: dict) -> list[JuegoPS]:
         clave = normalizar(j.nombre)
         previo = unicos.get(clave)
         unicos[clave] = _fusionar(j, previo) if previo else j
-    return list(unicos.values())
+    # Un producto sin ningun precio no sirve para nada aca, y si la cache solo
+    # trae de esos (fichas de navegacion, o PS Store dejo de meter el precio en
+    # el estado), devolverlos hacia que raspar_pagina diera la pagina por buena
+    # y nunca probara el plan B: la corrida terminaba con el reporte vacio.
+    return [j for j in unicos.values()
+            if j.precio_normal is not None or j.precio_oferta is not None]
 
 
 def _fusionar(a: JuegoPS, b: JuegoPS) -> JuegoPS:
@@ -524,8 +529,31 @@ def _fusionar(a: JuegoPS, b: JuegoPS) -> JuegoPS:
     )
 
 
-def desde_dom(driver) -> list[JuegoPS]:
-    """Plan B: leer las tarjetas renderizadas. Menos fiable, sin clasificacion."""
+# Etiquetas de plataforma que PS Store pinta sobre la caratula ("PS5", "PS4",
+# "PS VR2"). Desde que el texto de la ficha empieza por ellas, el camino por
+# texto tomaba "PS5" como nombre del juego y todas las fichas se fundian en una.
+_ETIQUETA_PLATAFORMA = re.compile(
+    r"^(?:PS ?VR ?2?|PS ?[345]|PC)(?:\s*[/|·,]?\s*(?:PS ?VR ?2?|PS ?[345]|PC))*$",
+    re.IGNORECASE,
+)
+
+
+def _es_linea_de_nombre(linea: str) -> bool:
+    """Una linea de la ficha que puede ser el nombre: ni precio, ni %, ni plataforma."""
+    return (not re.match(r"^[-+]?\s*[\d$%.,\s]+$", linea)
+            and not _ETIQUETA_PLATAFORMA.match(linea))
+
+
+def _id_de_href(href: str) -> str:
+    """Id de PS Store sacado del enlace de la ficha. Nunca uno inventado."""
+    href = href or ""
+    if "/product/" in href or "/concept/" in href:
+        return href.split("?")[0].rstrip("/").split("/")[-1]
+    return ""
+
+
+def _desde_dom_por_texto(driver) -> list[JuegoPS]:
+    """Plan B viejo: leer el texto de las tarjetas. Menos fiable, sin clasificacion."""
     from selenium.webdriver.common.by import By
 
     selectores_tarjeta = (
@@ -551,11 +579,9 @@ def desde_dom(driver) -> list[JuegoPS]:
             lineas = [l.strip() for l in texto.split("\n") if l.strip()]
             if not lineas:
                 continue
-            # Nombre: primera linea que no sea un precio ni un porcentaje.
-            nombre = next(
-                (l for l in lineas if not re.match(r"^[-+]?\s*[\d$%.,\s]+$", l)),
-                "",
-            )
+            # Nombre: primera linea que no sea un precio, un porcentaje ni una
+            # etiqueta de plataforma.
+            nombre = next((l for l in lineas if _es_linea_de_nombre(l)), "")
             # El selector tambien matchea nodos hijos de la tarjeta, que
             # producen filas basura sin nombre o con un precio por nombre.
             if not nombre or "$" in nombre:
@@ -583,9 +609,7 @@ def desde_dom(driver) -> list[JuegoPS]:
                     href = tarjeta.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href") or ""
                 except Exception:  # noqa: BLE001
                     href = ""
-            ps_id = ""
-            if "/product/" in href or "/concept/" in href:
-                ps_id = href.rstrip("/").split("/")[-1]
+            ps_id = _id_de_href(href)
 
             clave = ps_id or normalizar(nombre)
             if clave in vistos:
@@ -606,6 +630,171 @@ def desde_dom(driver) -> list[JuegoPS]:
         except Exception as e:  # noqa: BLE001 - una tarjeta rota no aborta la pagina
             log(f"  tarjeta {i} ilegible: {e}")
     return juegos
+
+
+# ---------------------------------------------------------------------------
+# PLAN B: FICHAS CON data-telemetry-meta
+# ---------------------------------------------------------------------------
+# El enlace de cada ficha de PS Store trae un atributo data-telemetry-meta con
+# el id real y el nombre exacto del producto. El PRECIO de ese metadato no es
+# confiable: la version anterior de este codigo suponia que traia
+# {"base": ..., "discount": ...}, pero si viene como texto (el precio que se
+# ve, sin el tachado) todas las fichas se descartaban, se caia al camino por
+# texto y el reporte salia vacio. Por eso los precios se leen de lo que la
+# ficha muestra (precio visible y precio tachado), y el metadato solo pone el
+# id y el nombre.
+#
+# Se hace en UNA llamada de JS por pagina y se devuelve TEXTO (JSON.stringify),
+# por la misma razon que JS_APOLLO: que chromedriver no reordene nada.
+#
+# La ficha completa es el ancestro mas alto del enlace que no contiene el
+# enlace de OTRO producto; asi los precios quedan adentro aunque PS Store los
+# pinte fuera del <a>, y nunca se mezclan con los de la ficha vecina.
+JS_FICHAS = """
+function texto(el) { return el ? (el.innerText || el.textContent || '').trim() : ''; }
+const enlaces = Array.from(document.querySelectorAll('a[data-telemetry-meta]'));
+const fichas = enlaces.map(function (a) {
+  const meta = a.getAttribute('data-telemetry-meta') || '';
+  let ficha = a;
+  for (let i = 0; i < 8 && ficha.parentElement; i++) {
+    const padre = ficha.parentElement;
+    const ajenos = Array.from(padre.querySelectorAll('a[data-telemetry-meta]'))
+      .some(function (x) { return x.getAttribute('data-telemetry-meta') !== meta; });
+    if (ajenos) break;
+    ficha = padre;
+  }
+  const q = function (sel) { return ficha.querySelector(sel); };
+  return {
+    meta: meta,
+    href: a.getAttribute('href') || '',
+    nombre: texto(q("[data-qa$='#product-name']")),
+    precio: texto(q("[data-qa$='#display-price']")),
+    tachado: texto(q("[data-qa$='#price-strikethrough'], s, del")),
+    descuento: texto(q("[data-qa$='#discount-badge#text']")),
+    texto: texto(ficha)
+  };
+});
+return JSON.stringify(fichas);
+"""
+
+_meta_invalida_avisada = False
+_MONTO = re.compile(r"\$\s?\d[\d.,]*")
+
+
+def _precios_de_meta(bloque: Any) -> list[Decimal]:
+    """Precios del metadato, venga como texto o como diccionario. Ultimo recurso."""
+    if isinstance(bloque, dict):
+        crudos = [bloque.get(k) for k in ("base", "basePrice", "discount", "discountedPrice")]
+    else:
+        crudos = [bloque]
+    # Solo textos tipo "$34.990": un numero pelado puede venir en centavos
+    # (x100, como los *Value de Apollo) y no hay forma de saberlo.
+    return [p for p in (parse_precio(c, MONEDA_ESPERADA) for c in crudos
+                        if isinstance(c, str) and c.strip()) if p is not None]
+
+
+def _juego_desde_ficha(ficha: dict) -> JuegoPS | None:
+    """Convierte lo que devolvio JS_FICHAS para una ficha en un JuegoPS."""
+    try:
+        meta = json.loads(ficha.get("meta") or "")
+    except (TypeError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    lineas = [l.strip() for l in str(ficha.get("texto") or "").split("\n") if l.strip()]
+    nombre = (str(meta.get("name") or "").strip()
+              or str(ficha.get("nombre") or "").strip()
+              or next((l for l in lineas if _es_linea_de_nombre(l)), ""))
+    if not nombre or "$" in nombre:
+        return None
+
+    # Precios que la ficha MUESTRA: el visible, el tachado y cualquier monto
+    # del texto. Se buscan con una regex y no linea por linea porque el
+    # navegador junta en una sola linea los elementos en linea
+    # ("$34.990 $69.990", "-40%$20.990$34.990").
+    vistos = [ficha.get("precio"), ficha.get("tachado")]
+    vistos += _MONTO.findall(str(ficha.get("texto") or ""))
+    precios = {p for p in (parse_precio(str(x), MONEDA_ESPERADA) for x in vistos if x)
+               if p is not None}
+    if len(precios) < 2:
+        # Si la ficha no deja ver el tachado, el metadato puede completarlo.
+        precios |= set(_precios_de_meta(meta.get("price")))
+    if not precios:
+        return None
+    if len(precios) > 2:
+        # Tres precios = hay un precio de PS Plus de por medio. Misma regla que
+        # el camino por texto: adivinar publica un precio mas barato que el real.
+        log(f"  '{nombre[:40]}' trae {len(precios)} precios: la salteo (¿precio PS Plus?)")
+        return None
+
+    descuento = str(ficha.get("descuento") or "").strip()
+    if not descuento:
+        hallado = re.search(r"[-−]\s?\d{1,3}\s?%", str(ficha.get("texto") or ""))
+        descuento = hallado.group(0) if hallado else None
+
+    return JuegoPS(
+        ps_id=str(meta.get("id") or "").strip() or _id_de_href(str(ficha.get("href") or "")),
+        nombre=nombre,
+        clasificacion=None,
+        moneda=MONEDA_ESPERADA,
+        precio_normal=max(precios),
+        precio_oferta=min(precios),
+        descuento=descuento,
+        origen="dom",
+    )
+
+
+def _desde_fichas(driver) -> list[JuegoPS]:
+    global _meta_invalida_avisada
+    try:
+        crudo = driver.execute_script(JS_FICHAS)
+        fichas = json.loads(crudo) if isinstance(crudo, str) else crudo
+    except Exception as e:  # noqa: BLE001 - si falla, queda el camino por texto
+        log(f"  no pude leer las fichas con metadato: {e}")
+        return []
+    if not isinstance(fichas, list):
+        return []
+
+    juegos: list[JuegoPS] = []
+    vistos: set[str] = set()
+    for i, ficha in enumerate(fichas):
+        if not isinstance(ficha, dict):
+            continue
+        try:
+            j = _juego_desde_ficha(ficha)
+        except Exception as e:  # noqa: BLE001 - una ficha rota no aborta la pagina
+            log(f"  ficha {i} ilegible: {e}")
+            continue
+        if not j:
+            continue
+        clave = j.ps_id or normalizar(j.nombre)
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        juegos.append(j)
+
+    if fichas and not juegos and not _meta_invalida_avisada:
+        # Una sola vez por corrida: deja en el log la forma real del metadato
+        # para arreglar la extraccion mirando datos, no adivinando.
+        _meta_invalida_avisada = True
+        log(f"  AVISO: {len(fichas)} fichas con metadato y ninguna legible. "
+            f"Ejemplo: {json.dumps(fichas[0], ensure_ascii=False)[:600]}")
+    return juegos
+
+
+def desde_dom(driver) -> list[JuegoPS]:
+    """Plan B: leer las fichas renderizadas. Sin clasificacion de producto.
+
+    Primero por las fichas con data-telemetry-meta (id y nombre exactos,
+    precios de lo que se ve). Si la pagina no las trae, el camino viejo por
+    texto de las tarjetas.
+    """
+    juegos = _desde_fichas(driver)
+    if juegos:
+        log(f"  DOM: lei {len(juegos)} fichas con metadato")
+        return juegos
+    return _desde_dom_por_texto(driver)
 
 
 def raspar_pagina(driver, categoria: str, pagina: int) -> tuple[list[JuegoPS], str]:
@@ -1185,6 +1374,13 @@ def modo_diagnostico(args) -> int:
         destino_html = REPORTES / f"pagina_renderizada_{datetime.now():%Y%m%d-%H%M%S}.html"
         destino_html.write_text(driver.page_source, encoding="utf-8")
         log(f"HTML renderizado guardado en {destino_html}")
+        try:
+            fichas = json.loads(driver.execute_script(JS_FICHAS) or "[]")
+            destino_fichas = destino_html.with_suffix(".fichas.json")
+            destino_fichas.write_text(json.dumps(fichas, ensure_ascii=False, indent=2), encoding="utf-8")
+            log(f"{len(fichas)} fichas con data-telemetry-meta -> {destino_fichas.name}")
+        except Exception as e:  # noqa: BLE001 - el diagnostico sigue igual
+            log(f"no pude leer las fichas con metadato: {e}")
 
         estado = leer_apollo(driver)
         if estado:
@@ -1442,6 +1638,11 @@ def modo_principal(args) -> int:
     log(f"{len(completos)} son juegos completos")
     en_oferta = [j for j in completos if j.en_oferta]
     log(f"{len(en_oferta)} estan en oferta")
+    if completos and not en_oferta:
+        # En la categoria de ofertas esto no pasa: es que no se pudo leer el
+        # precio tachado. Sin este aviso el reporte salia vacio en silencio.
+        log("OJO: ningun juego trae precio rebajado, asi que el reporte va a salir vacio. "
+            "Lo mas probable es que no se haya podido leer el precio tachado: corre --diagnostico.")
 
     estado_previo = cargar_estado()
     cambios, revisar = [], []
@@ -1600,102 +1801,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.fusionar_mapeo:
         return modo_fusionar_mapeo(args.fusionar_mapeo)
     return modo_principal(args)
-
-
-# ---------------------------------------------------------------------------
-# EXTRACCION POR METADATO DE TELEMETRIA (plan B, version nueva)
-# ---------------------------------------------------------------------------
-# PS Store cambio la ficha de producto: el texto visible de la tarjeta ya no
-# empieza por el nombre del juego sino por la etiqueta de plataforma ("PS5"),
-# y el selector por prefijo tambien matchea los nodos hijos de la tarjeta, por
-# eso salian 329 "tarjetas" para 24 productos y los nombres venian mal.
-#
-# El enlace de cada ficha trae un atributo data-telemetry-meta con el id real,
-# el nombre exacto y los dos precios. Leemos de ahi. Si la pagina no lo trae,
-# caemos al camino viejo por texto, que queda intacto.
-
-_desde_dom_por_texto = desde_dom
-
-
-def _meta_de_tarjeta(tarjeta) -> dict | None:
-    """Devuelve el data-telemetry-meta de una tarjeta, o None si no lo trae."""
-    from selenium.webdriver.common.by import By
-
-    try:
-        crudo = tarjeta.get_attribute("data-telemetry-meta") or ""
-    except Exception:  # noqa: BLE001
-        crudo = ""
-    if not crudo:
-        try:
-            enlace = tarjeta.find_element(By.CSS_SELECTOR, "a[data-telemetry-meta]")
-            crudo = enlace.get_attribute("data-telemetry-meta") or ""
-        except Exception:  # noqa: BLE001
-            return None
-    if not crudo:
-        return None
-    try:
-        meta = json.loads(crudo)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(meta, dict) or not meta.get("name"):
-        return None
-    return meta
-
-
-def desde_dom(driver) -> list[JuegoPS]:
-    """Plan B: leer las tarjetas renderizadas.
-
-    Primero por el metadato de telemetria, que trae el id, el nombre y los
-    precios exactos. Si la pagina no lo trae, se usa el camino viejo por
-    texto, que sigue tal cual estaba.
-    """
-    from selenium.webdriver.common.by import By
-
-    juegos: list[JuegoPS] = []
-    vistos: set[str] = set()
-    try:
-        enlaces = driver.find_elements(By.CSS_SELECTOR, "a[data-telemetry-meta]")
-    except Exception:  # noqa: BLE001
-        enlaces = []
-    for i, enlace in enumerate(enlaces):
-        try:
-            meta = _meta_de_tarjeta(enlace)
-            if not meta:
-                continue
-            nombre = str(meta.get("name") or "").strip()
-            ps_id = str(meta.get("id") or "").strip()
-            bloque = meta.get("price") or {}
-            if not isinstance(bloque, dict):
-                bloque = {}
-            normal = parse_precio(bloque.get("base"), MONEDA_ESPERADA)
-            oferta = parse_precio(bloque.get("discount"), MONEDA_ESPERADA)
-            if normal is None:
-                normal = oferta
-            if oferta is None:
-                oferta = normal
-            if not nombre or normal is None or oferta is None:
-                continue
-            clave = ps_id or normalizar(nombre)
-            if clave in vistos:
-                continue
-            vistos.add(clave)
-            juegos.append(
-                JuegoPS(
-                    ps_id=ps_id,
-                    nombre=nombre,
-                    clasificacion=None,
-                    moneda=MONEDA_ESPERADA,
-                    precio_normal=max(normal, oferta),
-                    precio_oferta=min(normal, oferta),
-                    origen="dom",
-                )
-            )
-        except Exception as e:  # noqa: BLE001
-            log(f"  tarjeta {i} ilegible (metadato): {e}")
-    if juegos:
-        log(f"  DOM: use el metadato de telemetria ({len(juegos)} productos)")
-        return juegos
-    return _desde_dom_por_texto(driver)
 
 
 if __name__ == "__main__":
