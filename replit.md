@@ -26,10 +26,10 @@ Digitales, Chile).
 ```bash
 python3 pruebas_offline.py       # 55 pruebas
 python3 pruebas_integracion.py   # 37 pruebas
-python3 pruebas_regresion.py     # 64 pruebas, una por bug ya corregido
+python3 pruebas_regresion.py     # 83 pruebas, una por bug ya corregido
 ```
 
-Ninguna toca internet ni Shopify. Si las 156 pasan, la lógica está sana.
+Ninguna toca internet ni Shopify. Si las 175 pasan, la lógica está sana.
 
 ## Primer paso en Replit
 

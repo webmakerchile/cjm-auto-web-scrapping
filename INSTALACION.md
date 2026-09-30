@@ -42,7 +42,7 @@ store.playstation.com/es-cl
 | `.replit` / `replit.nix` | Configuración de Replit: Python, Chromium y chromedriver. |
 | `pruebas_offline.py` | 55 pruebas de la lógica pura. |
 | `pruebas_integracion.py` | 37 pruebas de Selenium y Shopify con dobles. |
-| `pruebas_regresion.py` | 64 pruebas, una por cada bug ya corregido. |
+| `pruebas_regresion.py` | 83 pruebas, una por cada bug ya corregido. |
 | `estado.json` | Qué juegos estaban en oferta la corrida anterior. Se genera solo. |
 | `reportes/` | Salidas de cada corrida. No se versiona. |
 
@@ -105,10 +105,10 @@ export CJM_SHOPIFY_TIENDA="tu-tienda.myshopify.com"
 ```bash
 python3 pruebas_offline.py       # 55 pruebas de logica pura
 python3 pruebas_integracion.py   # 37 pruebas de Selenium y Shopify con dobles
-python3 pruebas_regresion.py     # 64 pruebas, una por cada bug ya corregido
+python3 pruebas_regresion.py     # 83 pruebas, una por cada bug ya corregido
 ```
 
-156 pruebas en total: precios, filtro, tramos, mapeo, los dos caminos de
+175 pruebas en total: precios, filtro, tramos, mapeo, los dos caminos de
 extracción (Apollo y DOM), reintentos, la paginación del catálogo de Shopify, la
 mutación de precios y los tres candados. **Ninguna abre Chrome ni toca internet
 ni escribe en Shopify**, así que se pueden correr siempre que cambies algo.

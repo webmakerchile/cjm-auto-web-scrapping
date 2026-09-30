@@ -34,11 +34,11 @@ productos que la gente está comprando.
 ```bash
 python3 pruebas_offline.py       # 55 pruebas de lógica pura
 python3 pruebas_integracion.py   # 37 pruebas de Selenium y Shopify (con dobles)
-python3 pruebas_regresion.py     # 64 pruebas, una por cada bug ya corregido
+python3 pruebas_regresion.py     # 83 pruebas, una por cada bug ya corregido
 ```
 
 Ninguna toca internet, abre Chrome ni escribe en Shopify. Corrélas siempre
-después de cambiar algo. Si las 156 pasan, la lógica está sana.
+después de cambiar algo. Si las 175 pasan, la lógica está sana.
 
 ## Estado actual del proyecto
 
@@ -58,12 +58,16 @@ Cuando PS Store cambia su HTML, el síntoma es "0 productos por página".
 1. Corré `python3 cjm_precios_ps.py --diagnostico`. Guarda el HTML renderizado y
    el estado de Apollo en `reportes/`.
 2. Mirá el HTML real. **No adivines selectores.**
-3. Tocá solo `JS_APOLLO`, `desde_apollo()` o `desde_dom()`. La lógica de
-   precios, el filtro y la parte de Shopify son independientes: no las toques
-   para arreglar un problema de extracción.
+3. Tocá solo `JS_APOLLO`, `desde_apollo()` o `desde_dom()` (y lo que este
+   usa: `JS_FICHAS`, `_juego_desde_ficha()`, `_desde_dom_por_texto()`). La
+   lógica de precios, el filtro y la parte de Shopify son independientes: no las
+   toques para arreglar un problema de extracción.
 4. Agregá una prueba en `pruebas_regresion.py` que cubra lo que cambiaste.
 
-Dos trampas que ya costaron caro y están documentadas en el código:
+`--diagnostico` también deja en `reportes/` un `*.fichas.json` con lo que
+`JS_FICHAS` leyó de cada ficha: mirá eso antes de tocar el plan B.
+
+Tres trampas que ya costaron caro y están documentadas en el código:
 
 - **`JS_APOLLO` devuelve texto, no un objeto.** ChromeDriver serializa los
   objetos JS reordenando las claves alfabéticamente, y con eso `Concept:` le
@@ -72,6 +76,11 @@ Dos trampas que ya costaron caro y están documentadas en el código:
 - **El plan B (DOM) no puede inventar ids.** Un id posicional tipo `dom-3` se
   repite en cada página y apunta a un juego distinto en cada corrida. Si entra a
   `mapeo.csv`, se le escribe a un producto el precio de otro.
+- **El precio del `data-telemetry-meta` no es confiable.** Se supuso que traía
+  `{"base", "discount"}`; si viene como texto (solo el precio visible) se
+  descartaban todas las fichas y el reporte de ofertas salía vacío. Del metadato
+  se toman el id y el nombre; los precios, de lo que la ficha muestra (visible y
+  tachado).
 
 ## Contexto de plataforma
 

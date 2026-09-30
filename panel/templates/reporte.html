@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block contenido %}
 <div class="tarjeta">
-  <h1>{{ nombre }}</h1>
+  <h1>{{ tipo or nombre }}</h1>
+  {% if tipo %}<p><small>{{ nombre }}</small></p>{% endif %}
   {% if encabezado %}
   <p>
     {% if not filtrable %}
@@ -13,10 +14,12 @@
       Solo juegos ({{ ocultados }} fila{{ 's' if ocultados != 1 }} de DLC, monedas, mapas u otros extras ocultas).
       <a href="{{ url_for('ver_reporte', nombre=nombre, todo=1) }}">Ver todo</a>
     {% endif %}
+    {% if filtrable %}
     &nbsp;·&nbsp;
     <a href="{{ url_for('descargar_reporte', nombre=nombre) }}">Descargar CSV solo juegos</a>
     &nbsp;·&nbsp;
     <a href="{{ url_for('descargar_reporte', nombre=nombre, todo=1) }}">Descargar CSV completo</a>
+    {% endif %}
   </p>
   <div style="overflow-x:auto;">
   <table>
@@ -26,7 +29,16 @@
     {% endfor %}
   </table>
   </div>
-  {% if filas|length == 0 %}<p>El reporte está vacío (solo encabezado).</p>{% endif %}
+  {% if filas|length == 0 %}
+    {% if nombre.startswith('cambios_') %}
+    <p class="aviso">Este reporte sale vacío porque todavía no hay juegos vinculados con productos de Shopify:
+       no es un error.
+       {% if hermano %}Las ofertas de esta corrida están en
+       <a href="{{ url_for('ver_reporte', nombre=hermano) }}">Ofertas encontradas en PS Store</a>.{% endif %}</p>
+    {% else %}
+    <p>El reporte está vacío (solo encabezado).</p>
+    {% endif %}
+  {% endif %}
   {% else %}
   <p>Archivo vacío.</p>
   {% endif %}

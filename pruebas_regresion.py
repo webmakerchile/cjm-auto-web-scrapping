@@ -11,6 +11,7 @@ volvio un bug que ya costo encontrar.
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
@@ -463,6 +464,127 @@ print("\nBAJO: dos corridas en el mismo minuto se pisaban el reporte")
 # ---------------------------------------------------------------------------
 revisar("el sello de los reportes incluye segundos",
         "%Y%m%d-%H%M%S" in Path("cjm_precios_ps.py").read_text(encoding="utf-8"), True)
+
+
+# ---------------------------------------------------------------------------
+print("\nCRITICO: el reporte de ofertas salia vacio (fichas con data-telemetry-meta)")
+# Antes: el plan B suponia que el metadato traia {"price": {"base", "discount"}}.
+# Si el precio viene como texto (el que se ve, sin el tachado), descartaba
+# TODAS las fichas, caia al camino por texto, que tomaba "PS5" como nombre del
+# juego, y todas las fichas se fundian en una: revisar_*.csv salia vacio.
+# Las fichas de abajo son lo que JS_FICHAS devolvio en Chromium real para un
+# HTML con cada forma de ficha.
+# ---------------------------------------------------------------------------
+def ficha(meta, texto, precio="", tachado="", descuento="", nombre="", href=""):
+    return {"meta": json.dumps(meta) if isinstance(meta, dict) else meta, "href": href,
+            "nombre": nombre, "precio": precio, "tachado": tachado,
+            "descuento": descuento, "texto": texto}
+
+
+FICHAS = [
+    # Menu de la pagina: metadato sin nombre, no es un producto.
+    ficha({"id": "nav", "index": 0}, "Ofertas", href="/es-cl/pages/deals"),
+    # Precio del metadato como TEXTO, con los data-qa de PS Store.
+    ficha({"id": "EP9000-PPSA08338_00-MARVELSPIDERMAN2", "name": "Marvel's Spider-Man 2",
+           "price": "$34.990"},
+          "PS5\nMarvel's Spider-Man 2\n-50%\n$34.990 $69.990", precio="$34.990",
+          tachado="$69.990", descuento="-50%", nombre="Marvel's Spider-Man 2"),
+    # Precio del metadato como DICCIONARIO y sin data-qa.
+    ficha({"id": "EP4312-CUSA00419_00-GTAVCRIMINALENTE", "name": "Grand Theft Auto V",
+           "price": {"base": "$29.990", "discount": "$14.995"}},
+          "PS4\nGrand Theft Auto V\n-50%\n$14.995\n$29.990", tachado="$29.990"),
+    # Precio PS Plus: tres precios.
+    ficha({"id": "EP1234-PPSA99999_00-BALDURSGATE30000", "name": "Baldur's Gate 3",
+           "price": "$30.990"},
+          "PS5\nBaldur's Gate 3\n-50%\n$30.990\n$19.990\n$61.990", tachado="$61.990"),
+    # Sin oferta: un solo precio.
+    ficha({"id": "EP9000-PPSA00001_00-ASTROBOT00000000", "name": "ASTRO BOT", "price": "$59.990"},
+          "PS5\nASTRO BOT\n$59.990"),
+    # Elementos en linea: el navegador junta los precios en una sola linea, y
+    # la ficha trae dos enlaces (caratula y titulo) con el mismo metadato.
+    ficha({"id": "EP0002-PPSA02222_00-SPLITFICTION0000", "name": "Split Fiction",
+           "price": "$20.990"}, "PS5 Split Fiction\n-40%$20.990$34.990", tachado="$34.990"),
+    ficha({"id": "EP0002-PPSA02222_00-SPLITFICTION0000", "name": "Split Fiction",
+           "price": "$20.990"}, "PS5 Split Fiction\n-40%$20.990$34.990", tachado="$34.990"),
+]
+
+
+class DriverFichas(DriverFalso):
+    """Sin estado de Apollo; JS_FICHAS devuelve las fichas como texto."""
+
+    def __init__(self, fichas, apollo=None):
+        super().__init__(apollo=apollo)
+        self.fichas = fichas
+
+    def execute_script(self, s):
+        if s == cjm.JS_FICHAS:
+            return json.dumps(self.fichas)
+        return super().execute_script(s)
+
+
+juegos, origen = cjm.raspar_pagina(DriverFichas(FICHAS), "c", 1)
+por_nombre = {j.nombre: j for j in juegos}
+revisar("lee las fichas por el plan B", origen, "dom")
+revisar("el menu y el precio PS Plus no entran, el duplicado se funde",
+        sorted(por_nombre), ["ASTRO BOT", "Grand Theft Auto V", "Marvel's Spider-Man 2", "Split Fiction"])
+sm2 = por_nombre["Marvel's Spider-Man 2"]
+revisar("precio del metadato como texto: el nombre sale del metadato, no 'PS5'",
+        sm2.nombre, "Marvel's Spider-Man 2")
+revisar("precio del metadato como texto: se lee el tachado y queda en oferta",
+        (sm2.precio_normal, sm2.precio_oferta, sm2.en_oferta), (Decimal("69990"), Decimal("34990"), True))
+revisar("el id sale del metadato", sm2.ps_id, "EP9000-PPSA08338_00-MARVELSPIDERMAN2")
+revisar("el descuento llega al reporte", sm2.descuento, "-50%")
+revisar("precio del metadato como diccionario tambien funciona",
+        (por_nombre["Grand Theft Auto V"].precio_normal, por_nombre["Grand Theft Auto V"].precio_oferta),
+        (Decimal("29990"), Decimal("14995")))
+revisar("precios pegados en una linea se separan bien",
+        (por_nombre["Split Fiction"].precio_normal, por_nombre["Split Fiction"].precio_oferta),
+        (Decimal("34990"), Decimal("20990")))
+revisar("un solo precio no inventa una oferta", por_nombre["ASTRO BOT"].en_oferta, False)
+
+revisar("solo el precio del metadato como texto no inventa oferta",
+        cjm._juego_desde_ficha(ficha({"id": "EP-X", "name": "Solo Meta", "price": "$9.990"}, "")).en_oferta,
+        False)
+gta_sin_tachado = cjm._juego_desde_ficha(ficha(
+    {"id": "EP-GTA", "name": "Grand Theft Auto V", "price": {"base": "$29.990", "discount": "$14.995"}},
+    "PS4\nGrand Theft Auto V\n$14.995"))
+revisar("si la ficha no deja ver el tachado, el metadato lo completa",
+        (gta_sin_tachado.precio_normal, gta_sin_tachado.precio_oferta), (Decimal("29990"), Decimal("14995")))
+revisar("un precio numerico del metadato (quiza en centavos) no se usa",
+        cjm._juego_desde_ficha(ficha({"id": "EP-X", "name": "X", "price": {"base": 5999000}}, "")), None)
+
+d = DriverFalso(tarjetas=[ElementoFalso("PS5\nMarvel's Spider-Man 2\n-50%\n$34.990\n$69.990",
+                                        "https://store.playstation.com/es-cl/product/EP-SM2")])
+revisar("camino por texto: la etiqueta 'PS5' no se toma como nombre",
+        cjm.desde_dom(d)[0].nombre, "Marvel's Spider-Man 2")
+d = DriverFalso(tarjetas=[ElementoFalso("PS4 PS5\nPS VR2\nGran Turismo 7\n$19.990\n$39.990")])
+revisar("camino por texto: tampoco 'PS4 PS5' ni 'PS VR2'", cjm.desde_dom(d)[0].nombre, "Gran Turismo 7")
+
+sin_precio = {"Product:EP-A": {"__typename": "Product", "id": "EP-A", "name": "Juego A",
+                               "storeDisplayClassification": "FULL_GAME"}}
+revisar("apollo sin ningun precio no cuenta como productos", cjm.desde_apollo(sin_precio), [])
+revisar("y la pagina cae al plan B en vez de quedar vacia",
+        cjm.raspar_pagina(DriverFichas(FICHAS, apollo=sin_precio), "c", 1)[1], "dom")
+
+with tempfile.TemporaryDirectory() as tmp:
+    carpeta = Path(tmp)
+    (carpeta / "mapeo.csv").write_text(
+        "ps_id,ps_nombre,producto_id,variante_primaria,variante_secundaria,activo\n", encoding="utf-8")
+    originales = (cjm.abrir_navegador, cjm.REPORTES, cjm.ARCHIVO_MAPEO, cjm.ARCHIVO_ESTADO)
+    cjm.REPORTES, cjm.ARCHIVO_MAPEO = carpeta / "reportes", carpeta / "mapeo.csv"
+    cjm.ARCHIVO_ESTADO = carpeta / "estado.json"
+    cjm.abrir_navegador = lambda headless=True: DriverFichas(FICHAS)
+    try:
+        revisar("la corrida del panel termina bien", cjm.main(["--solo-simular", "--paginas", "1"]), 0)
+        filas = list(csv.DictReader(
+            sorted((carpeta / "reportes").glob("revisar_*.csv"))[-1].open(encoding="utf-8-sig")))
+        revisar("revisar_*.csv trae las ofertas en vez de salir vacio",
+                sorted(f["ps_nombre"] for f in filas),
+                ["Grand Theft Auto V", "Marvel's Spider-Man 2", "Split Fiction"])
+        revisar("con el precio rebajado", {f["ps_nombre"]: f["precio_ps"] for f in filas}
+                ["Marvel's Spider-Man 2"], "34990")
+    finally:
+        cjm.abrir_navegador, cjm.REPORTES, cjm.ARCHIVO_MAPEO, cjm.ARCHIVO_ESTADO = originales
 
 
 # ---------------------------------------------------------------------------

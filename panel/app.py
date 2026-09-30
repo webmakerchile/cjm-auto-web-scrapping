@@ -252,14 +252,44 @@ def _correr_scraper(paginas: int | None) -> None:
         _corrida["activa"] = False
 
 
+# Qué es cada reporte, dicho para la clienta. Una corrida deja dos CSV con la
+# misma fecha, y el de cambios sale vacío mientras mapeo.csv no vincule juegos
+# con productos de Shopify: sin decirlo, parecía que la corrida no había sacado
+# nada aunque las ofertas estuvieran en el de revisar.
+TIPOS_REPORTE = (
+    ("revisar_", "Ofertas encontradas en PS Store"),
+    ("cambios_", "Precios que se cambiarían en Shopify"),
+    ("filtro_", "Auditoría del filtro de juegos"),
+    ("mapeo_propuesto_", "Mapeo propuesto"),
+    ("mapeo_dudoso_", "Mapeo dudoso"),
+)
+
+
+def tipo_reporte(nombre: str) -> str:
+    return next((t for prefijo, t in TIPOS_REPORTE if nombre.startswith(prefijo)), "")
+
+
 def ultimos_reportes() -> list[dict]:
+    # A igual fecha, "revisar_" antes que "cambios_": el de las ofertas primero.
     filas = consulta(
-        "SELECT nombre, modificado FROM reportes ORDER BY modificado DESC LIMIT 10"
+        "SELECT nombre, modificado, contenido FROM reportes "
+        "ORDER BY modificado DESC, nombre DESC LIMIT 10"
     )
-    return [
-        {"nombre": f["nombre"], "modificado": f["modificado"].strftime("%d-%m-%Y %H:%M:%S")}
-        for f in filas
-    ]
+    reportes = []
+    for f in filas:
+        todas = [r for r in csv.reader(io.StringIO(f["contenido"])) if r]
+        cuerpo = todas[1:]
+        juegos = None
+        if f["nombre"].startswith("revisar_") and todas:
+            juegos = len(filtrar_extras(todas[0], cuerpo)[0])
+        reportes.append({
+            "nombre": f["nombre"],
+            "tipo": tipo_reporte(f["nombre"]),
+            "filas": len(cuerpo),
+            "juegos": juegos,
+            "modificado": f["modificado"].strftime("%d-%m-%Y %H:%M:%S"),
+        })
+    return reportes
 
 
 def leer_csv(nombre: str) -> tuple[list[str], list[list[str]]]:
@@ -376,14 +406,23 @@ def ver_reporte(nombre: str):
     ocultados = 0
     if filtrable and not mostrar_todo:
         filas, ocultados = filtrar_extras(encabezado, filas)
+    # El de cambios vacío no es un error: las ofertas de esa misma corrida
+    # están en el revisar_ con el mismo sello. Se enlaza directo.
+    hermano = None
+    if nombre.startswith("cambios_") and not filas:
+        candidato = "revisar_" + nombre[len("cambios_"):]
+        if consulta("SELECT 1 FROM reportes WHERE nombre = %s", (candidato,)):
+            hermano = candidato
     return render_template(
         "reporte.html",
         nombre=nombre,
+        tipo=tipo_reporte(nombre),
         encabezado=encabezado,
         filas=filas,
         filtrable=filtrable,
         mostrar_todo=mostrar_todo,
         ocultados=ocultados,
+        hermano=hermano,
     )
 
 
