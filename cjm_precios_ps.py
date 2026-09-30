@@ -69,7 +69,11 @@ CATEGORIAS: tuple[tuple[str, int], ...] = (
     ("3f772501-f6f8-49b7-abac-874a88ca4897", 152),
 )
 
-LOCALE = "es-cl"
+# La tienda chilena dejo de mostrar las ofertas en esta categoria (30-09-2026):
+# en es-cl solo 2 de 23 fichas traian descuento, contra 23 de 24 en en-us, y
+# las dos publican los precios en dolares. Se puede volver a es-cl sin tocar
+# codigo con la variable de entorno CJM_PS_LOCALE.
+LOCALE = os.environ.get("CJM_PS_LOCALE", "en-us").strip() or "en-us"
 URL_CATEGORIA = "https://store.playstation.com/{locale}/category/{cat}/{pagina}"
 
 # La tienda es-cl publica precios en pesos chilenos. Si algun dia PS Store
